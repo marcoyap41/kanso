@@ -15,7 +15,8 @@ app.set('trust proxy', 1);
 const PORT = Number(process.env.PORT) || 4000;
 const MAX_BOARDS_PER_USER = 5;
 function normalizeFrontendUrl(raw) {
-  let url = (raw || 'http://localhost:3000').trim().replace(/\/+$/, '');
+  const first = String(raw || '').split(',')[0].trim();
+  let url = (first || 'http://localhost:3000').replace(/\/+$/, '');
   if (!/^https?:\/\//i.test(url)) {
     url = `https://${url}`;
   }
@@ -23,6 +24,62 @@ function normalizeFrontendUrl(raw) {
 }
 
 const FRONTEND_URL = normalizeFrontendUrl(process.env.FRONTEND_URL);
+
+function buildAllowedOrigins() {
+  const rawList = [process.env.FRONTEND_URL, process.env.CORS_ORIGIN]
+    .filter(Boolean)
+    .flatMap((v) => String(v).split(','))
+    .map((v) => v.trim())
+    .filter(Boolean);
+
+  const allowed = new Set();
+  for (const item of rawList.length > 0 ? rawList : ['http://localhost:3000']) {
+    const normalized = normalizeFrontendUrl(item);
+    allowed.add(normalized);
+    try {
+      const u = new URL(normalized);
+      if (u.hostname.startsWith('www.')) {
+        u.hostname = u.hostname.slice(4);
+        allowed.add(u.origin);
+      } else if (u.hostname !== 'localhost' && !/^\d+\.\d+\.\d+\.\d+$/.test(u.hostname)) {
+        u.hostname = `www.${u.hostname}`;
+        allowed.add(u.origin);
+      }
+    } catch {
+      // ignore malformed URL
+    }
+  }
+  return allowed;
+}
+
+const ALLOWED_ORIGINS = buildAllowedOrigins();
+
+function isAllowedOrigin(origin) {
+  if (!origin) return true;
+  const clean = origin.trim().replace(/\/+$/, '');
+  return (
+    ALLOWED_ORIGINS.has(clean) ||
+    /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(clean)
+  );
+}
+
+function getRequestFrontendOrigin(req) {
+  const rawOrigin = req.get('origin');
+  if (rawOrigin) {
+    const clean = rawOrigin.trim().replace(/\/+$/, '');
+    if (isAllowedOrigin(clean)) return clean;
+  }
+  const rawReferer = req.get('referer');
+  if (rawReferer) {
+    try {
+      const refOrigin = new URL(rawReferer).origin;
+      if (isAllowedOrigin(refOrigin)) return refOrigin;
+    } catch {
+      // ignore malformed referer
+    }
+  }
+  return FRONTEND_URL;
+}
 
 const LINK_TTL_MINUTES = 30;
 const LINK_TTL_MS = LINK_TTL_MINUTES * 60 * 1000;
@@ -56,7 +113,7 @@ const oauthTickets = new Map();
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin || origin === FRONTEND_URL || /^http:\/\/localhost:\d+$/.test(origin)) {
+      if (isAllowedOrigin(origin)) {
         return cb(null, true);
       }
       return cb(null, FRONTEND_URL);
@@ -222,7 +279,12 @@ function getCallbackUrl(provider, req) {
 function getOAuthAuthorizationUrl(provider, req) {
   pruneExpired(oauthStates);
   const state = randomBytes(24).toString('base64url');
-  oauthStates.set(sha256(state), { provider, expiresAt: Date.now() + STATE_TTL_MS });
+  const frontendOrigin = getRequestFrontendOrigin(req);
+  oauthStates.set(sha256(state), {
+    provider,
+    frontendOrigin,
+    expiresAt: Date.now() + STATE_TTL_MS,
+  });
 
   const redirectUri = getCallbackUrl(provider, req);
 
@@ -397,10 +459,14 @@ async function authenticateOAuthCallback(provider, code, state, req) {
   }
 
   const redirectUri = getCallbackUrl(provider, req);
-  if (provider === 'google') {
-    return verifyGoogleCode(code, redirectUri);
-  }
-  return verifyGithubCode(code, redirectUri);
+  const profile =
+    provider === 'google'
+      ? await verifyGoogleCode(code, redirectUri)
+      : await verifyGithubCode(code, redirectUri);
+  return {
+    profile,
+    frontendOrigin: stored.frontendOrigin || FRONTEND_URL,
+  };
 }
 
 function parseId(raw) {
@@ -1065,29 +1131,42 @@ authRouter.post('/logout', async (req, res) => {
 });
 
 function startOAuth(provider, req, res) {
+  const redirectBase = getRequestFrontendOrigin(req);
   try {
     const url = getOAuthAuthorizationUrl(provider, req);
     return res.redirect(url);
   } catch (err) {
     const msg = err?.message || `Could not start ${provider} sign-in.`;
-    return res.redirect(`${FRONTEND_URL}/#auth_error=${encodeURIComponent(msg)}`);
+    return res.redirect(`${redirectBase}/#auth_error=${encodeURIComponent(msg)}`);
   }
 }
 
 async function finishOAuth(provider, req, res) {
   const { code, state, error } = req.query;
+  let redirectBase = FRONTEND_URL;
+  if (typeof state === 'string' && state) {
+    const peek = oauthStates.get(sha256(state));
+    if (peek?.frontendOrigin) {
+      redirectBase = peek.frontendOrigin;
+    }
+  }
+
   if (error) {
+    if (typeof state === 'string' && state) {
+      oauthStates.delete(sha256(state));
+    }
     const msg = error === 'access_denied' ? 'Sign-in was cancelled.' : `OAuth error: ${error}`;
-    return res.redirect(`${FRONTEND_URL}/#auth_error=${encodeURIComponent(String(msg))}`);
+    return res.redirect(`${redirectBase}/#auth_error=${encodeURIComponent(String(msg))}`);
   }
 
   try {
-    const profile = await authenticateOAuthCallback(
+    const { profile, frontendOrigin } = await authenticateOAuthCallback(
       provider,
       typeof code === 'string' ? code : undefined,
       typeof state === 'string' ? state : undefined,
       req
     );
+    redirectBase = frontendOrigin || redirectBase;
 
     let user = null;
     const linked = await pool.query(
@@ -1140,10 +1219,10 @@ async function finishOAuth(provider, req, res) {
       expiresAt: Date.now() + TICKET_TTL_MS,
     });
 
-    return res.redirect(`${FRONTEND_URL}/#auth=success&ticket=${encodeURIComponent(ticket)}`);
+    return res.redirect(`${redirectBase}/#auth=success&ticket=${encodeURIComponent(ticket)}`);
   } catch (err) {
     const msg = err?.message || `Could not complete ${provider} sign-in.`;
-    return res.redirect(`${FRONTEND_URL}/#auth_error=${encodeURIComponent(msg)}`);
+    return res.redirect(`${redirectBase}/#auth_error=${encodeURIComponent(msg)}`);
   }
 }
 
