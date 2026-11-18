@@ -5,16 +5,55 @@ const pool = new Pool({
 });
 
 /**
- * Initialize PostgreSQL schema if tables do not yet exist.
+ * Initialize PostgreSQL schema and migrate auth/OAuth tables safely.
  */
 async function initDb() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
-      username VARCHAR(100) UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
+      email VARCHAR(254),
+      name VARCHAR(100),
+      username VARCHAR(100) NOT NULL,
+      password_hash TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(254);
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(100);
+    ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;
+    ALTER TABLE users DROP CONSTRAINT IF EXISTS users_username_key;
+    DELETE FROM users WHERE email IS NULL OR username = 'zenuser';
+    ALTER TABLE users ALTER COLUMN email SET NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_idx ON users (LOWER(email));
+
+    CREATE TABLE IF NOT EXISTS pending_signups (
+      email VARCHAR(254) PRIMARY KEY,
+      name VARCHAR(100),
+      password_hash TEXT NOT NULL,
+      token_hash VARCHAR(64) NOT NULL,
+      token_expires_at TIMESTAMPTZ NOT NULL,
+      pending_expires_at TIMESTAMPTZ NOT NULL,
+      last_sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      send_count INTEGER NOT NULL DEFAULT 1
+    );
+
+    CREATE TABLE IF NOT EXISTS oauth_accounts (
+      id SERIAL PRIMARY KEY,
+      provider VARCHAR(20) NOT NULL,
+      provider_user_id VARCHAR(255) NOT NULL,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (provider, provider_user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS refresh_tokens (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash VARCHAR(64) UNIQUE NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS refresh_tokens_user_id_idx ON refresh_tokens (user_id);
 
     CREATE TABLE IF NOT EXISTS task_boards (
       id SERIAL PRIMARY KEY,
@@ -41,8 +80,15 @@ async function initDb() {
       title VARCHAR(200) NOT NULL,
       completed BOOLEAN NOT NULL DEFAULT FALSE,
       time_spent_seconds INTEGER NOT NULL DEFAULT 0,
+      scheduled_date VARCHAR(10),
+      scheduled_time VARCHAR(5),
+      scheduled_duration_minutes INTEGER NOT NULL DEFAULT 60,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    ALTER TABLE tasks ADD COLUMN IF NOT EXISTS scheduled_date VARCHAR(10);
+    ALTER TABLE tasks ADD COLUMN IF NOT EXISTS scheduled_time VARCHAR(5);
+    ALTER TABLE tasks ADD COLUMN IF NOT EXISTS scheduled_duration_minutes INTEGER NOT NULL DEFAULT 60;
 
     CREATE TABLE IF NOT EXISTS subtasks (
       id SERIAL PRIMARY KEY,
@@ -53,50 +99,30 @@ async function initDb() {
       time_spent_seconds INTEGER NOT NULL DEFAULT 0,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
-  `);
-}
 
-/**
- * Seed the canonical starter hierarchy for a newly registered user:
- * Task Board: College -> Project: Metopen -> Task: Tugas 5.5 -> Subtasks
- */
-async function seedUserStarterData(userId, client = pool) {
-  const boardRes = await client.query(
-    `INSERT INTO task_boards (user_id, name, color, position)
-     VALUES ($1, $2, $3, $4)
-     RETURNING id`,
-    [userId, 'College', '#38BDF8', 0]
-  );
-  const boardId = boardRes.rows[0].id;
-
-  const projectRes = await client.query(
-    `INSERT INTO projects (board_id, user_id, name, description)
-     VALUES ($1, $2, $3, $4)
-     RETURNING id`,
-    [boardId, userId, 'Metopen', 'Research methodology coursework and proposal milestones']
-  );
-  const projectId = projectRes.rows[0].id;
-
-  const taskRes = await client.query(
-    `INSERT INTO tasks (project_id, user_id, title)
-     VALUES ($1, $2, $3)
-     RETURNING id`,
-    [projectId, userId, 'Tugas 5.5']
-  );
-  const taskId = taskRes.rows[0].id;
-
-  const starterSubtasks = ['Read proposal', 'Write Checklist', 'Submit'];
-  for (const title of starterSubtasks) {
-    await client.query(
-      `INSERT INTO subtasks (task_id, user_id, title)
-       VALUES ($1, $2, $3)`,
-      [taskId, userId, title]
+    CREATE TABLE IF NOT EXISTS focus_sessions (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      board_id INTEGER REFERENCES task_boards(id) ON DELETE SET NULL,
+      project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+      task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+      subtask_id INTEGER REFERENCES subtasks(id) ON DELETE SET NULL,
+      task_title VARCHAR(200) NOT NULL DEFAULT 'Focus Session',
+      subtask_title VARCHAR(200),
+      project_name VARCHAR(160) DEFAULT '',
+      board_name VARCHAR(120) DEFAULT '',
+      board_color VARCHAR(32) NOT NULL DEFAULT '#FFFFFF',
+      mode VARCHAR(20) NOT NULL DEFAULT 'pomodoro',
+      duration_seconds INTEGER NOT NULL DEFAULT 0,
+      started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      ended_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      session_date VARCHAR(10) NOT NULL
     );
-  }
+    CREATE INDEX IF NOT EXISTS focus_sessions_user_date_idx ON focus_sessions (user_id, session_date);
+  `);
 }
 
 module.exports = {
   pool,
   initDb,
-  seedUserStarterData,
 };

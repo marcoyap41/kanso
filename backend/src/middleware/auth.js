@@ -18,8 +18,10 @@ function authMiddleware(req, res, next) {
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
+    const userId = decoded.sub || decoded.id;
     req.user = {
-      id: decoded.id,
+      id: userId,
+      email: decoded.email,
       username: decoded.username,
     };
     return next();

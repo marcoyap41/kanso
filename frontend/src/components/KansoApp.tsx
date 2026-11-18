@@ -2,11 +2,12 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { ArrowLeft, ArrowRight, LogOut, Timer } from 'lucide-react';
+import { Calendar, Home, Layers, LogOut, Timer } from 'lucide-react';
 import { api } from '@/lib/api';
-import { formatTimerClock, playZenChime } from '@/lib/time';
+import { formatTimerClock, playZenChime, toLocalDateKey } from '@/lib/time';
 import type {
   FocusSelection,
+  FocusSession,
   PageIndex,
   PomodoroPhase,
   PomodoroPreset,
@@ -67,6 +68,7 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
   ]);
 
   const [boards, setBoards] = useState<TaskBoard[]>([]);
+  const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
   const [loadingHierarchy, setLoadingHierarchy] = useState(true);
   const [selection, setSelection] = useState<FocusSelection>({
     boardId: null,
@@ -88,9 +90,12 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
   const [remainingSeconds, setRemainingSeconds] = useState(25 * 60);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [isRunning, setIsRunning] = useState(false);
+  const [sessionWorkedSeconds, setSessionWorkedSeconds] = useState(0);
 
   const timerOverlayRef = useRef<TimerOverlayHandle | null>(null);
   const unsyncedSecondsRef = useRef(0);
+  const sessionStartedAtRef = useRef<string | null>(null);
+  const timerModeRef = useRef<TimerMode>(timerMode);
   const activeTargetRef = useRef<{
     taskId: number | null;
     subtaskId: number | null;
@@ -105,8 +110,12 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
 
   const refreshHierarchy = useCallback(async () => {
     try {
-      const data = await api.getHierarchy();
+      const [data, sessionsData] = await Promise.all([
+        api.getHierarchy(),
+        api.getFocusSessions(),
+      ]);
       setBoards(data.boards);
+      setFocusSessions(sessionsData.sessions);
 
       setSelection((prev) => {
         const board =
@@ -154,26 +163,55 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
     };
   }, [selection.taskId, selection.subtaskId]);
 
+  useEffect(() => {
+    timerModeRef.current = timerMode;
+  }, [timerMode]);
+
+  useEffect(() => {
+    if (isRunning && !sessionStartedAtRef.current) {
+      sessionStartedAtRef.current = new Date().toISOString();
+    }
+  }, [isRunning]);
+
   const flushWorkedSeconds = useCallback(async () => {
     const delta = unsyncedSecondsRef.current;
+    const startedAt = sessionStartedAtRef.current;
+    unsyncedSecondsRef.current = 0;
+    sessionStartedAtRef.current = null;
+    setSessionWorkedSeconds(0);
+
     if (delta <= 0) return;
 
     const { taskId, subtaskId } = activeTargetRef.current;
     if (!taskId && !subtaskId) {
-      unsyncedSecondsRef.current = 0;
       return;
     }
 
-    unsyncedSecondsRef.current = 0;
+    const sessionDate = toLocalDateKey(new Date());
+    const mode = timerModeRef.current;
     try {
       if (subtaskId) {
-        await api.updateSubtask(subtaskId, { add_seconds: delta });
+        await api.updateSubtask(subtaskId, {
+          add_seconds: delta,
+          mode,
+          session_date: sessionDate,
+          started_at: startedAt,
+        });
       } else if (taskId) {
-        await api.updateTask(taskId, { add_seconds: delta });
+        await api.updateTask(taskId, {
+          add_seconds: delta,
+          mode,
+          session_date: sessionDate,
+          started_at: startedAt,
+        });
       }
       await refreshHierarchy();
     } catch {
       unsyncedSecondsRef.current += delta;
+      setSessionWorkedSeconds((prev) => prev + delta);
+      if (!sessionStartedAtRef.current && startedAt) {
+        sessionStartedAtRef.current = startedAt;
+      }
     }
   }, [refreshHierarchy]);
 
@@ -193,7 +231,7 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [navigateTo, pageIndex]);
 
-  // 1-second timer tick loop
+  // 1-second timer tick loop (accumulates session seconds until session ends)
   useEffect(() => {
     if (!isRunning) return;
 
@@ -201,9 +239,11 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
       if (timerMode === 'normal') {
         setElapsedSeconds((prev) => prev + 1);
         unsyncedSecondsRef.current += 1;
+        setSessionWorkedSeconds((prev) => prev + 1);
       } else {
         if (pomodoroPhase === 'work') {
           unsyncedSecondsRef.current += 1;
+          setSessionWorkedSeconds((prev) => prev + 1);
         }
         setRemainingSeconds((prev) => {
           if (prev > 1) return prev - 1;
@@ -224,10 +264,6 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
           }
         });
       }
-
-      if (unsyncedSecondsRef.current >= 15) {
-        void flushWorkedSeconds();
-      }
     }, 1000);
 
     return () => window.clearInterval(interval);
@@ -240,12 +276,6 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
     customBreakMinutes,
     flushWorkedSeconds,
   ]);
-
-  useEffect(() => {
-    if (!isRunning) {
-      void flushWorkedSeconds();
-    }
-  }, [isRunning, flushWorkedSeconds]);
 
   const resolved = useMemo(() => {
     const board =
@@ -263,6 +293,30 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
     return { board, project, task, subtask };
   }, [boards, selection]);
 
+  const resetTimerClock = useCallback(
+    (
+      nextPreset: PomodoroPreset = pomodoroPreset,
+      nextWork: number = customWorkMinutes,
+      nextBreak: number = customBreakMinutes
+    ) => {
+      setIsRunning(false);
+      setElapsedSeconds(0);
+      setPomodoroPhase('work');
+      const { workSeconds } = getPomodoroDurations(
+        nextPreset,
+        nextWork,
+        nextBreak
+      );
+      setRemainingSeconds(workSeconds);
+    },
+    [pomodoroPreset, customWorkMinutes, customBreakMinutes]
+  );
+
+  const handleEndSession = useCallback(async () => {
+    resetTimerClock();
+    await flushWorkedSeconds();
+  }, [flushWorkedSeconds, resetTimerClock]);
+
   const handleChangeTimerConfig = useCallback(
     (cfg: {
       mode?: TimerMode;
@@ -275,52 +329,35 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
       const nextWork = cfg.customWork ?? customWorkMinutes;
       const nextBreak = cfg.customBreak ?? customBreakMinutes;
 
+      setIsRunning(false);
+      void flushWorkedSeconds();
+
       setTimerMode(nextMode);
       setPomodoroPreset(nextPreset);
       setCustomWorkMinutes(nextWork);
       setCustomBreakMinutes(nextBreak);
 
-      if (nextMode === 'pomodoro') {
-        const { workSeconds, breakSeconds } = getPomodoroDurations(
-          nextPreset,
-          nextWork,
-          nextBreak
-        );
-        setRemainingSeconds(
-          pomodoroPhase === 'work' ? workSeconds : breakSeconds
-        );
-      }
+      setElapsedSeconds(0);
+      setPomodoroPhase('work');
+      const { workSeconds } = getPomodoroDurations(
+        nextPreset,
+        nextWork,
+        nextBreak
+      );
+      setRemainingSeconds(workSeconds);
     },
     [
+      flushWorkedSeconds,
       timerMode,
       pomodoroPreset,
       customWorkMinutes,
       customBreakMinutes,
-      pomodoroPhase,
     ]
   );
 
   const handleResetTimer = useCallback(() => {
-    setIsRunning(false);
-    void flushWorkedSeconds();
-    if (timerMode === 'normal') {
-      setElapsedSeconds(0);
-    } else {
-      const { workSeconds } = getPomodoroDurations(
-        pomodoroPreset,
-        customWorkMinutes,
-        customBreakMinutes
-      );
-      setPomodoroPhase('work');
-      setRemainingSeconds(workSeconds);
-    }
-  }, [
-    flushWorkedSeconds,
-    timerMode,
-    pomodoroPreset,
-    customWorkMinutes,
-    customBreakMinutes,
-  ]);
+    void handleEndSession();
+  }, [handleEndSession]);
 
   const handleChooseFocusForWork = useCallback(
     async (nextSelection: FocusSelection, autoStart = false) => {
@@ -331,45 +368,28 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
         taskId: nextSelection.taskId,
         subtaskId: nextSelection.subtaskId,
       };
-      if (timerMode === 'normal') {
-        setElapsedSeconds(0);
-      } else {
-        const { workSeconds } = getPomodoroDurations(
-          pomodoroPreset,
-          customWorkMinutes,
-          customBreakMinutes
-        );
-        setPomodoroPhase('work');
-        setRemainingSeconds(workSeconds);
-      }
+      resetTimerClock();
       setIsWorkingMode(true);
       navigateTo(1);
       if (autoStart) {
         setIsRunning(true);
       }
     },
-    [
-      flushWorkedSeconds,
-      timerMode,
-      pomodoroPreset,
-      customWorkMinutes,
-      customBreakMinutes,
-      navigateTo,
-    ]
+    [flushWorkedSeconds, resetTimerClock, navigateTo]
   );
 
   const handleExitWorkingMode = useCallback(() => {
-    setIsRunning(false);
+    resetTimerClock();
     setForceOverlay(false);
     void flushWorkedSeconds();
     setIsWorkingMode(false);
-  }, [flushWorkedSeconds]);
+  }, [flushWorkedSeconds, resetTimerClock]);
 
   const handleCompleteTarget = useCallback(async () => {
     if (resolved.subtask) {
       const nextCompleted = !resolved.subtask.completed;
       if (nextCompleted) {
-        setIsRunning(false);
+        resetTimerClock();
         await flushWorkedSeconds();
       }
       await api.updateSubtask(resolved.subtask.id, {
@@ -378,13 +398,29 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
     } else if (resolved.task) {
       const nextCompleted = !resolved.task.completed;
       if (nextCompleted) {
-        setIsRunning(false);
+        resetTimerClock();
         await flushWorkedSeconds();
       }
       await api.updateTask(resolved.task.id, { completed: nextCompleted });
+      const subsToUpdate = resolved.task.subtasks.filter(
+        (s) => s.completed !== nextCompleted
+      );
+      if (subsToUpdate.length > 0) {
+        await Promise.all(
+          subsToUpdate.map((s) =>
+            api.updateSubtask(s.id, { completed: nextCompleted })
+          )
+        );
+      }
     }
     await refreshHierarchy();
-  }, [flushWorkedSeconds, resolved.subtask, resolved.task, refreshHierarchy]);
+  }, [
+    flushWorkedSeconds,
+    resetTimerClock,
+    resolved.subtask,
+    resolved.task,
+    refreshHierarchy,
+  ]);
 
   const displaySeconds =
     timerMode === 'pomodoro' ? remainingSeconds : elapsedSeconds;
@@ -398,47 +434,51 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
       <header className="relative z-20 flex flex-wrap items-center justify-between gap-4 px-5 sm:px-10 py-5 border-b border-white/[0.06] bg-[#0A0A0C]/80 backdrop-blur-md">
         <KansoLogo onClick={() => navigateTo(1)} />
 
-        {/* Center Spatial Switcher: Task Management <- Home -> Calendar */}
+        {/* Center Spatial Switcher: Task Management <- Home -> Calendar (Icon-only) */}
         <nav
           aria-label="Primary sections"
-          className="order-3 sm:order-2 w-full sm:w-auto flex items-center justify-center gap-1.5 sm:gap-2 rounded-full border border-white/10 bg-[#121216]/90 p-1"
+          className="order-3 sm:order-2 flex items-center justify-center gap-1 rounded-full border border-white/10 bg-[#121216]/90 p-1"
         >
           <button
             type="button"
             onClick={() => navigateTo(0)}
-            className={`inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-medium transition ${
+            title="Task Management"
+            aria-label="Task Management"
+            className={`inline-flex h-9 w-11 items-center justify-center rounded-full transition ${
               pageIndex === 0
-                ? 'bg-white text-[#0A0A0C] font-semibold shadow-[0_0_18px_rgba(255,255,255,0.14)]'
-                : 'text-zinc-400 hover:text-white'
+                ? 'bg-white text-[#0A0A0C] shadow-[0_0_18px_rgba(255,255,255,0.14)]'
+                : 'text-zinc-400 hover:text-white hover:bg-white/[0.06]'
             }`}
           >
-            {pageIndex > 0 && <ArrowLeft className="w-3 h-3 opacity-60" />}
-            <span>Task Management</span>
+            <Layers className="w-4 h-4" />
           </button>
 
           <button
             type="button"
             onClick={() => navigateTo(1)}
-            className={`rounded-full px-4 py-1.5 text-xs font-medium transition ${
+            title="Home"
+            aria-label="Home"
+            className={`inline-flex h-9 w-11 items-center justify-center rounded-full transition ${
               pageIndex === 1
-                ? 'bg-white text-[#0A0A0C] font-semibold shadow-[0_0_18px_rgba(255,255,255,0.14)]'
-                : 'text-zinc-400 hover:text-white'
+                ? 'bg-white text-[#0A0A0C] shadow-[0_0_18px_rgba(255,255,255,0.14)]'
+                : 'text-zinc-400 hover:text-white hover:bg-white/[0.06]'
             }`}
           >
-            Home
+            <Home className="w-4 h-4" />
           </button>
 
           <button
             type="button"
             onClick={() => navigateTo(2)}
-            className={`inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-medium transition ${
+            title="Calendar"
+            aria-label="Calendar"
+            className={`inline-flex h-9 w-11 items-center justify-center rounded-full transition ${
               pageIndex === 2
-                ? 'bg-white text-[#0A0A0C] font-semibold shadow-[0_0_18px_rgba(255,255,255,0.14)]'
-                : 'text-zinc-400 hover:text-white'
+                ? 'bg-white text-[#0A0A0C] shadow-[0_0_18px_rgba(255,255,255,0.14)]'
+                : 'text-zinc-400 hover:text-white hover:bg-white/[0.06]'
             }`}
           >
-            <span>Calendar</span>
-            {pageIndex < 2 && <ArrowRight className="w-3 h-3 opacity-60" />}
+            <Calendar className="w-4 h-4" />
           </button>
         </nav>
 
@@ -464,14 +504,14 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
           <button
             type="button"
             onClick={() => {
-              setIsRunning(false);
-              void flushWorkedSeconds();
-              onLogout();
+              void handleEndSession().finally(() => {
+                onLogout();
+              });
             }}
             title="Sign out"
             className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-[#141418] hover:bg-white hover:text-[#0A0A0C] px-4 py-1.5 text-xs font-medium text-zinc-200 transition"
           >
-            <span>{user.username}</span>
+            <span>{user.name || user.username || user.email}</span>
             <LogOut className="w-3.5 h-3.5" />
           </button>
         </div>
@@ -529,7 +569,9 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
                   customBreakMinutes={customBreakMinutes}
                   displaySeconds={displaySeconds}
                   isRunning={isRunning}
+                  hasActiveSession={isRunning || sessionWorkedSeconds > 0}
                   onToggleRun={() => setIsRunning((r) => !r)}
+                  onEndSession={() => void handleEndSession()}
                   onResetTimer={handleResetTimer}
                   onChangeTimerConfig={handleChangeTimerConfig}
                   onCompleteTarget={() => void handleCompleteTarget()}
@@ -541,7 +583,14 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
               )}
 
               {pageIndex === 2 && (
-                <CalendarView onBackHome={() => navigateTo(1)} />
+                <CalendarView
+                  boards={boards}
+                  focusSessions={focusSessions}
+                  onRefresh={refreshHierarchy}
+                  onStartWork={(sel) => void handleChooseFocusForWork(sel, true)}
+                  onGoToTaskManagement={() => navigateTo(0)}
+                  onBackHome={() => navigateTo(1)}
+                />
               )}
             </motion.div>
           </AnimatePresence>
@@ -555,7 +604,7 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
         onClose={() => {
           setForceOverlay(false);
           if (pageIndex !== 1) {
-            setIsRunning(false);
+            void handleEndSession();
           }
         }}
         board={resolved.board}
@@ -569,7 +618,9 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
         customBreakMinutes={customBreakMinutes}
         displaySeconds={displaySeconds}
         isRunning={isRunning}
+        hasActiveSession={isRunning || sessionWorkedSeconds > 0}
         onToggleRun={() => setIsRunning((r) => !r)}
+        onEndSession={() => void handleEndSession()}
         onReset={handleResetTimer}
         onChangeConfig={handleChangeTimerConfig}
         onCompleteTarget={() => void handleCompleteTarget()}

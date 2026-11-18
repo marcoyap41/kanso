@@ -16,6 +16,7 @@ import {
   Pause,
   Play,
   RotateCcw,
+  Square,
   Timer,
   X,
 } from 'lucide-react';
@@ -56,7 +57,9 @@ interface TimerOverlayProps {
   customBreakMinutes: number;
   displaySeconds: number;
   isRunning: boolean;
+  hasActiveSession: boolean;
   onToggleRun: () => void;
+  onEndSession: () => void;
   onReset: () => void;
   onChangeConfig: (cfg: {
     mode?: TimerMode;
@@ -83,7 +86,9 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
       customBreakMinutes,
       displaySeconds,
       isRunning,
+      hasActiveSession,
       onToggleRun,
+      onEndSession,
       onReset,
       onChangeConfig,
       onCompleteTarget,
@@ -267,6 +272,18 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
             >
               <RotateCcw className="w-3.5 h-3.5" />
             </button>
+
+            {hasActiveSession && (
+              <button
+                type="button"
+                onClick={onEndSession}
+                title="End session and save log"
+                className="inline-flex items-center gap-1 rounded-full border border-rose-400/35 bg-rose-500/15 hover:bg-rose-500/25 px-3 py-2 text-xs font-semibold text-rose-200 transition"
+              >
+                <Square className="w-3 h-3 fill-current" />
+                <span>End</span>
+              </button>
+            )}
           </div>
 
           <button
@@ -500,6 +517,18 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
                     >
                       <RotateCcw className="w-3.5 h-3.5" />
                     </button>
+
+                    {hasActiveSession && (
+                      <button
+                        type="button"
+                        onClick={onEndSession}
+                        title="End session and save log"
+                        className="inline-flex items-center gap-1 rounded-full border border-rose-400/35 bg-rose-500/15 hover:bg-rose-500/25 px-3 py-2 text-xs font-semibold text-rose-200 transition"
+                      >
+                        <Square className="w-3 h-3 fill-current" />
+                        <span>End</span>
+                      </button>
+                    )}
                   </div>
 
                   <button

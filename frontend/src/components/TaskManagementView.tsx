@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import {
+  Calendar,
   Check,
   ChevronDown,
   ChevronRight,
@@ -15,7 +16,11 @@ import {
   X,
 } from 'lucide-react';
 import { api } from '@/lib/api';
-import { formatLoggedDuration } from '@/lib/time';
+import {
+  formatLoggedDuration,
+  formatShortDateLabel,
+  toLocalDateKey,
+} from '@/lib/time';
 import {
   BOARD_COLOR_PALETTE,
   MAX_TASK_BOARDS,
@@ -65,6 +70,12 @@ export function TaskManagementView({
   const [subtaskDrafts, setSubtaskDrafts] = useState<Record<number, string>>(
     {}
   );
+
+  // Task inline schedule editor state
+  const [schedulingTaskId, setSchedulingTaskId] = useState<number | null>(null);
+  const [scheduleDateDraft, setScheduleDateDraft] = useState('');
+  const [scheduleTimeDraft, setScheduleTimeDraft] = useState('');
+  const [scheduleDurationDraft, setScheduleDurationDraft] = useState(60);
 
   const activeBoard =
     boards.find((b) => b.id === selectedBoardId) || boards[0] || null;
@@ -153,7 +164,18 @@ export function TaskManagementView({
 
   async function handleToggleTask(task: Task) {
     await runAction(async () => {
-      await api.updateTask(task.id, { completed: !task.completed });
+      const nextCompleted = !task.completed;
+      await api.updateTask(task.id, { completed: nextCompleted });
+      const subsToUpdate = task.subtasks.filter(
+        (s) => s.completed !== nextCompleted
+      );
+      if (subsToUpdate.length > 0) {
+        await Promise.all(
+          subsToUpdate.map((s) =>
+            api.updateSubtask(s.id, { completed: nextCompleted })
+          )
+        );
+      }
     });
   }
 
@@ -183,6 +205,39 @@ export function TaskManagementView({
   async function handleDeleteSubtask(subtaskId: number) {
     await runAction(async () => {
       await api.deleteSubtask(subtaskId);
+    });
+  }
+
+  function openScheduleEditor(task: Task) {
+    if (schedulingTaskId === task.id) {
+      setSchedulingTaskId(null);
+      return;
+    }
+    setSchedulingTaskId(task.id);
+    setScheduleDateDraft(task.scheduled_date || toLocalDateKey(new Date()));
+    setScheduleTimeDraft(task.scheduled_time || '');
+    setScheduleDurationDraft(task.scheduled_duration_minutes || 60);
+  }
+
+  async function handleSaveSchedule(e: React.FormEvent, taskId: number) {
+    e.preventDefault();
+    await runAction(async () => {
+      await api.updateTask(taskId, {
+        scheduled_date: scheduleDateDraft || null,
+        scheduled_time: scheduleTimeDraft || null,
+        scheduled_duration_minutes: scheduleDurationDraft,
+      });
+      setSchedulingTaskId(null);
+    });
+  }
+
+  async function handleClearSchedule(taskId: number) {
+    await runAction(async () => {
+      await api.updateTask(taskId, {
+        scheduled_date: null,
+        scheduled_time: null,
+      });
+      setSchedulingTaskId(null);
     });
   }
 
@@ -594,10 +649,19 @@ export function TaskManagementView({
                                 <button
                                   type="button"
                                   onClick={() => handleToggleTask(task)}
-                                  aria-label={`Mark ${task.title} complete`}
+                                  title={
+                                    task.completed
+                                      ? 'Unmark task as done'
+                                      : 'Mark task as done'
+                                  }
+                                  aria-label={
+                                    task.completed
+                                      ? `Unmark ${task.title} as done`
+                                      : `Mark ${task.title} as done`
+                                  }
                                   className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition ${
                                     task.completed
-                                      ? 'border-white bg-white text-[#0A0A0C]'
+                                      ? 'border-emerald-400 bg-emerald-400 text-[#0A0A0C]'
                                       : 'border-white/30 hover:border-white'
                                   }`}
                                 >
@@ -637,6 +701,25 @@ export function TaskManagementView({
                                     {completedSubs}/{task.subtasks.length}
                                   </span>
                                 )}
+
+                                {task.scheduled_date && (
+                                  <button
+                                    type="button"
+                                    onClick={() => openScheduleEditor(task)}
+                                    title="Edit task schedule"
+                                    className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.05] hover:border-white/25 px-2 py-0.5 text-[10px] font-mono text-zinc-300 shrink-0 transition"
+                                  >
+                                    <Calendar className="w-2.5 h-2.5 text-zinc-400" />
+                                    <span>
+                                      {formatShortDateLabel(
+                                        task.scheduled_date
+                                      )}
+                                      {task.scheduled_time
+                                        ? ` · ${task.scheduled_time}`
+                                        : ''}
+                                    </span>
+                                  </button>
+                                )}
                               </div>
 
                               <div className="flex items-center gap-1.5 shrink-0">
@@ -647,6 +730,24 @@ export function TaskManagementView({
                                     )}
                                   </span>
                                 )}
+                                <button
+                                  type="button"
+                                  onClick={() => openScheduleEditor(task)}
+                                  title={
+                                    task.scheduled_date
+                                      ? 'Edit task schedule'
+                                      : 'Schedule task'
+                                  }
+                                  aria-label={`Schedule ${task.title}`}
+                                  className={`rounded-lg p-1.5 transition ${
+                                    schedulingTaskId === task.id ||
+                                    task.scheduled_date
+                                      ? 'bg-white/10 text-white hover:bg-white/20'
+                                      : 'text-zinc-500 hover:bg-white/10 hover:text-white'
+                                  }`}
+                                >
+                                  <Calendar className="w-3.5 h-3.5" />
+                                </button>
                                 <button
                                   type="button"
                                   onClick={() =>
@@ -674,6 +775,105 @@ export function TaskManagementView({
                               </div>
                             </div>
 
+                            {/* Inline Task Schedule Editor */}
+                            {schedulingTaskId === task.id && (
+                              <form
+                                onSubmit={(e) => handleSaveSchedule(e, task.id)}
+                                className="mt-3 rounded-xl border border-white/15 bg-[#0A0A0C] p-3 flex flex-wrap items-end gap-2.5"
+                              >
+                                <div className="flex-1 min-w-[130px]">
+                                  <label className="block text-[10px] uppercase tracking-wider text-zinc-500 mb-1">
+                                    Date
+                                  </label>
+                                  <input
+                                    type="date"
+                                    required
+                                    value={scheduleDateDraft}
+                                    onChange={(e) =>
+                                      setScheduleDateDraft(e.target.value)
+                                    }
+                                    className="w-full rounded-lg border border-white/10 bg-[#141418] px-2.5 py-1.5 text-xs text-white focus:border-white/30 focus:outline-none [color-scheme:dark]"
+                                  />
+                                </div>
+
+                                <div className="w-28">
+                                  <label className="block text-[10px] uppercase tracking-wider text-zinc-500 mb-1">
+                                    Time (opt)
+                                  </label>
+                                  <input
+                                    type="time"
+                                    value={scheduleTimeDraft}
+                                    onChange={(e) =>
+                                      setScheduleTimeDraft(e.target.value)
+                                    }
+                                    className="w-full rounded-lg border border-white/10 bg-[#141418] px-2.5 py-1.5 text-xs text-white focus:border-white/30 focus:outline-none [color-scheme:dark]"
+                                  />
+                                </div>
+
+                                <div className="w-24">
+                                  <label className="block text-[10px] uppercase tracking-wider text-zinc-500 mb-1">
+                                    Duration
+                                  </label>
+                                  <select
+                                    value={scheduleDurationDraft}
+                                    onChange={(e) =>
+                                      setScheduleDurationDraft(
+                                        Number(e.target.value)
+                                      )
+                                    }
+                                    className="w-full rounded-lg border border-white/10 bg-[#141418] px-2 py-1.5 text-xs text-white focus:border-white/30 focus:outline-none"
+                                  >
+                                    {![
+                                      15, 25, 30, 45, 50, 60, 90, 120, 180, 240,
+                                    ].includes(scheduleDurationDraft) && (
+                                      <option value={scheduleDurationDraft}>
+                                        {scheduleDurationDraft}m
+                                      </option>
+                                    )}
+                                    <option value={15}>15m</option>
+                                    <option value={25}>25m</option>
+                                    <option value={30}>30m</option>
+                                    <option value={45}>45m</option>
+                                    <option value={50}>50m</option>
+                                    <option value={60}>1h</option>
+                                    <option value={90}>1h 30m</option>
+                                    <option value={120}>2h</option>
+                                    <option value={180}>3h</option>
+                                    <option value={240}>4h</option>
+                                  </select>
+                                </div>
+
+                                <div className="flex items-center gap-1.5 ml-auto">
+                                  {task.scheduled_date && (
+                                    <button
+                                      type="button"
+                                      disabled={busy}
+                                      onClick={() =>
+                                        handleClearSchedule(task.id)
+                                      }
+                                      className="rounded-lg border border-rose-500/25 bg-rose-500/10 hover:bg-rose-500/20 px-2.5 py-1.5 text-[11px] font-medium text-rose-300 transition"
+                                    >
+                                      Clear
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => setSchedulingTaskId(null)}
+                                    className="rounded-lg border border-white/10 px-2.5 py-1.5 text-[11px] text-zinc-400 hover:text-white transition"
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    type="submit"
+                                    disabled={busy}
+                                    className="rounded-lg bg-white text-[#0A0A0C] hover:bg-zinc-200 px-3 py-1.5 text-[11px] font-semibold transition"
+                                  >
+                                    Save
+                                  </button>
+                                </div>
+                              </form>
+                            )}
+
                             {/* Optional Subtasks Section */}
                             {isExpanded && (
                               <div className="mt-3 pl-6 space-y-1.5 border-l border-white/10 ml-2">
@@ -691,9 +891,19 @@ export function TaskManagementView({
                                             sub.completed
                                           )
                                         }
+                                        title={
+                                          sub.completed
+                                            ? 'Unmark subtask as done'
+                                            : 'Mark subtask as done'
+                                        }
+                                        aria-label={
+                                          sub.completed
+                                            ? `Unmark ${sub.title} as done`
+                                            : `Mark ${sub.title} as done`
+                                        }
                                         className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border transition ${
                                           sub.completed
-                                            ? 'border-white bg-white text-[#0A0A0C]'
+                                            ? 'border-emerald-400 bg-emerald-400 text-[#0A0A0C]'
                                             : 'border-white/25 hover:border-white'
                                         }`}
                                       >

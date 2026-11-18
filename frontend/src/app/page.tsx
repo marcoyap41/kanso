@@ -1,7 +1,12 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
-import { api, getStoredToken, setStoredToken } from '@/lib/api';
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  api,
+  hasSessionHint,
+  setOnSessionLost,
+  setSessionHint,
+} from '@/lib/api';
 import { AuthScreen } from '@/components/AuthScreen';
 import { KansoApp } from '@/components/KansoApp';
 import type { User } from '@/types/kanso';
@@ -9,26 +14,133 @@ import type { User } from '@/types/kanso';
 export default function Page() {
   const [user, setUser] = useState<User | null>(null);
   const [checkingSession, setCheckingSession] = useState(true);
+  const [authError, setAuthError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const token = getStoredToken();
-    if (!token) {
-      setCheckingSession(false);
-      return;
+  const processAuthHash = useCallback(async (): Promise<boolean> => {
+    if (typeof window === 'undefined') return false;
+    const hash = window.location.hash || '';
+
+    const authErrMatch = hash.match(/(?:^|[#&])auth_error=([^&]+)/);
+    if (authErrMatch) {
+      window.history.replaceState(
+        null,
+        '',
+        window.location.pathname + window.location.search
+      );
+      setAuthError(decodeURIComponent(authErrMatch[1]));
+      return true;
     }
 
-    api
-      .me()
-      .then((res) => {
+    const verifyMatch = hash.match(/(?:^|[#&])verify=([^&]+)/);
+    if (verifyMatch) {
+      const token = decodeURIComponent(verifyMatch[1]);
+      window.history.replaceState(
+        null,
+        '',
+        window.location.pathname + window.location.search
+      );
+      try {
+        const res = await api.verifyEmail(token);
+        setAuthError(null);
         setUser(res.user);
-      })
-      .catch(() => {
-        setStoredToken(null);
-      })
-      .finally(() => {
-        setCheckingSession(false);
-      });
+      } catch (err) {
+        setSessionHint(false);
+        setUser(null);
+        setAuthError(
+          err instanceof Error
+            ? err.message
+            : 'This verification link is invalid or has expired.'
+        );
+      }
+      return true;
+    }
+
+    if (hash.includes('auth=success')) {
+      const ticketMatch = hash.match(/(?:^|[#&])ticket=([^&]+)/);
+      window.history.replaceState(
+        null,
+        '',
+        window.location.pathname + window.location.search
+      );
+      if (ticketMatch) {
+        try {
+          const res = await api.exchangeOAuthTicket(
+            decodeURIComponent(ticketMatch[1])
+          );
+          setAuthError(null);
+          setUser(res.user);
+          return true;
+        } catch (err) {
+          const restored = await api.refresh();
+          if (restored) {
+            setAuthError(null);
+            setUser(restored);
+            return true;
+          }
+          setSessionHint(false);
+          setUser(null);
+          setAuthError(
+            err instanceof Error
+              ? err.message
+              : 'OAuth sign-in expired or failed. Please try again.'
+          );
+          return true;
+        }
+      }
+
+      const restored = await api.refresh();
+      if (restored) {
+        setAuthError(null);
+        setUser(restored);
+      }
+      return true;
+    }
+
+    return false;
   }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    setOnSessionLost(() => {
+      if (active) setUser(null);
+    });
+
+    async function init() {
+      const handledHash = await processAuthHash();
+      if (!active) return;
+      if (handledHash) {
+        setCheckingSession(false);
+        return;
+      }
+
+      if (!hasSessionHint()) {
+        setCheckingSession(false);
+        return;
+      }
+
+      try {
+        const restored = await api.refresh();
+        if (active && restored) {
+          setUser(restored);
+        }
+      } finally {
+        if (active) setCheckingSession(false);
+      }
+    }
+
+    void init();
+
+    function handleHashChange() {
+      void processAuthHash();
+    }
+    window.addEventListener('hashchange', handleHashChange);
+    return () => {
+      active = false;
+      setOnSessionLost(null);
+      window.removeEventListener('hashchange', handleHashChange);
+    };
+  }, [processAuthHash]);
 
   if (checkingSession) {
     return (
@@ -42,14 +154,23 @@ export default function Page() {
   }
 
   if (!user) {
-    return <AuthScreen onAuthenticated={(u) => setUser(u)} />;
+    return (
+      <AuthScreen
+        initialError={authError}
+        onClearInitialError={() => setAuthError(null)}
+        onAuthenticated={(u) => {
+          setAuthError(null);
+          setUser(u);
+        }}
+      />
+    );
   }
 
   return (
     <KansoApp
       user={user}
       onLogout={() => {
-        setStoredToken(null);
+        void api.logout();
         setUser(null);
       }}
     />

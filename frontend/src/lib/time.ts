@@ -50,6 +50,47 @@ export function formatLoggedDuration(totalSeconds: number): string {
 }
 
 /**
+ * Format a Date object into a local YYYY-MM-DD key without UTC drift.
+ */
+export function toLocalDateKey(date: Date = new Date()): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+/**
+ * Parse a YYYY-MM-DD key into a local midnight Date without UTC offset shifts.
+ */
+export function parseLocalDateKey(dateStr: string): Date {
+  const parts = dateStr.split('-').map(Number);
+  const y = parts[0] || 1970;
+  const m = parts[1] || 1;
+  const d = parts[2] || 1;
+  return new Date(y, m - 1, d, 0, 0, 0, 0);
+}
+
+/**
+ * Format a YYYY-MM-DD date string into Today, Tomorrow, Yesterday, or "Nov 17".
+ */
+export function formatShortDateLabel(dateStr: string): string {
+  const now = new Date();
+  const todayKey = toLocalDateKey(now);
+  if (dateStr === todayKey) return 'Today';
+
+  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  if (dateStr === toLocalDateKey(tomorrow)) return 'Tomorrow';
+
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  if (dateStr === toLocalDateKey(yesterday)) return 'Yesterday';
+
+  return parseLocalDateKey(dateStr).toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+/**
  * Play a gentle synthesized zen bell chime via Web Audio API when a Pomodoro phase finishes.
  */
 export function playZenChime(): void {

@@ -4,13 +4,16 @@ import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   ArrowLeft,
+  ArrowRight,
   Check,
   CheckCircle2,
   ExternalLink,
+  Layers,
   Pause,
   Play,
   RotateCcw,
   SlidersHorizontal,
+  Square,
   X,
 } from 'lucide-react';
 import { api } from '@/lib/api';
@@ -45,7 +48,9 @@ interface HomeViewProps {
   customBreakMinutes: number;
   displaySeconds: number;
   isRunning: boolean;
+  hasActiveSession: boolean;
   onToggleRun: () => void;
+  onEndSession: () => void;
   onResetTimer: () => void;
   onChangeTimerConfig: (cfg: {
     mode?: TimerMode;
@@ -117,6 +122,23 @@ const REEL_VARIANTS = {
   }),
 };
 
+function getHeaderBadgeStyle(color?: string) {
+  if (color && color.startsWith('#') && color.length === 7) {
+    return {
+      color: color,
+      backgroundColor: `${color}25`,
+      borderColor: `${color}60`,
+      boxShadow: `0 0 16px -2px ${color}35`,
+    };
+  }
+  return {
+    color: color || '#FFFFFF',
+    backgroundColor: 'rgba(255, 255, 255, 0.16)',
+    borderColor: 'rgba(255, 255, 255, 0.35)',
+    boxShadow: '0 0 16px -2px rgba(255, 255, 255, 0.25)',
+  };
+}
+
 export function HomeView({
   user,
   boards,
@@ -135,7 +157,9 @@ export function HomeView({
   customBreakMinutes,
   displaySeconds,
   isRunning,
+  hasActiveSession,
   onToggleRun,
+  onEndSession,
   onResetTimer,
   onChangeTimerConfig,
   onCompleteTarget,
@@ -174,7 +198,18 @@ export function HomeView({
   }, [activeProject?.id, activeTask?.id, activeSubtask?.id]);
 
   async function handleToggleTaskDone(task: Task) {
-    await api.updateTask(task.id, { completed: !task.completed });
+    const nextCompleted = !task.completed;
+    await api.updateTask(task.id, { completed: nextCompleted });
+    const subsToUpdate = task.subtasks.filter(
+      (s) => s.completed !== nextCompleted
+    );
+    if (subsToUpdate.length > 0) {
+      await Promise.all(
+        subsToUpdate.map((s) =>
+          api.updateSubtask(s.id, { completed: nextCompleted })
+        )
+      );
+    }
     await onRefresh();
   }
 
@@ -266,7 +301,7 @@ export function HomeView({
               </p>
 
               <h1 className="mt-2 text-5xl sm:text-7xl font-bold tracking-[-0.04em] leading-[1.03] text-white">
-                Hello, {user.username}
+                Hello, {user.name || user.username || user.email.split('@')[0]}
               </h1>
 
               {/* PLAY Button [hover: start working out] */}
@@ -274,10 +309,6 @@ export function HomeView({
                 <button
                   type="button"
                   onClick={() => {
-                    if (boards.length === 0) {
-                      onGoToTaskManagement();
-                      return;
-                    }
                     setInspectingBoardId(null);
                     setBoardsSpreadOpen((prev) => !prev);
                   }}
@@ -291,19 +322,49 @@ export function HomeView({
                     <Play className="w-5 h-5 fill-[#0A0A0C] shrink-0" />
                   )}
                   <span className="max-w-0 overflow-hidden whitespace-nowrap text-sm font-bold tracking-tight opacity-0 group-hover:max-w-[170px] group-hover:opacity-100 transition-all duration-300">
-                    {boards.length === 0
-                      ? 'create a board'
-                      : boardsSpreadOpen
-                        ? 'close boards'
+                    {boardsSpreadOpen
+                      ? boards.length === 0
+                        ? 'close'
+                        : 'close boards'
+                      : boards.length === 0
+                        ? 'no task boards'
                         : 'start working out'}
                   </span>
                 </button>
               </div>
             </div>
 
-            {/* Stage 2A: Radial Spread of Task Boards around the center (Desktop lg+) */}
+            {/* Stage 2A: Radial Spread of Task Boards OR Empty Taskboard Prompt */}
             <AnimatePresence>
-              {boardsSpreadOpen && (
+              {boardsSpreadOpen && boards.length === 0 ? (
+                <motion.div
+                  initial={{ opacity: 0, y: 16, scale: 0.96 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 10, scale: 0.96 }}
+                  transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+                  className="relative z-20 mt-8 w-full max-w-md rounded-3xl border border-white/15 bg-[#121216]/95 backdrop-blur-xl p-6 text-center shadow-[0_24px_80px_rgba(0,0,0,0.75)]"
+                >
+                  <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-2xl border border-white/15 bg-white/[0.06]">
+                    <Layers className="w-5 h-5 text-zinc-300" />
+                  </div>
+                  <h2 className="text-base font-bold text-white">
+                    No task boards yet
+                  </h2>
+                  <p className="mt-1.5 text-xs text-zinc-400 leading-relaxed">
+                    You don&apos;t have any task boards yet. Add your first
+                    board in Task Management to start organizing projects and
+                    focus sessions.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={onGoToTaskManagement}
+                    className="mt-5 inline-flex items-center gap-2 rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 px-5 py-2.5 text-xs font-semibold shadow-[0_0_24px_rgba(255,255,255,0.16)] transition"
+                  >
+                    <span>Add Task Board in Task Management</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </motion.div>
+              ) : boardsSpreadOpen ? (
                 <>
                   {/* Desktop radial spread */}
                   <div className="hidden lg:block pointer-events-none absolute inset-0 z-10">
@@ -435,7 +496,7 @@ export function HomeView({
                     })}
                   </motion.div>
                 </>
-              )}
+              ) : null}
             </AnimatePresence>
           </motion.div>
         ) : !isWorkingMode && inspectingBoard ? (
@@ -855,8 +916,10 @@ export function HomeView({
                       }
                       style={{ color: activeBoard?.color || '#FFFFFF' }}
                       title={`Switch project in ${activeBoard?.name || 'board'}`}
-                      className={`underline-offset-4 hover:underline transition focus:outline-none ${
-                        openPathDropdown === 'project' ? 'underline' : ''
+                      className={`rounded-lg px-2 py-0.5 -mx-1 underline-offset-4 transition focus:outline-none ${
+                        openPathDropdown === 'project'
+                          ? 'bg-white/10 ring-1 ring-white/25 underline font-bold'
+                          : 'hover:bg-white/[0.06] hover:underline'
                       }`}
                     >
                       {activeProject.name}
@@ -879,8 +942,10 @@ export function HomeView({
                         }
                         style={{ color: activeBoard?.color || '#FFFFFF' }}
                         title={`Switch task in ${activeProject?.name || 'project'}`}
-                        className={`underline-offset-4 hover:underline transition focus:outline-none ${
-                          openPathDropdown === 'task' ? 'underline' : ''
+                        className={`rounded-lg px-2 py-0.5 -mx-1 underline-offset-4 transition focus:outline-none ${
+                          openPathDropdown === 'task'
+                            ? 'bg-white/10 ring-1 ring-white/25 underline font-bold'
+                            : 'hover:bg-white/[0.06] hover:underline'
                         }`}
                       >
                         {activeTask.title}
@@ -900,8 +965,10 @@ export function HomeView({
                         }
                         style={{ color: activeBoard?.color || '#FFFFFF' }}
                         title={`Switch subtask in ${activeTask?.title || 'task'}`}
-                        className={`underline-offset-4 hover:underline transition focus:outline-none ${
-                          openPathDropdown === 'subtask' ? 'underline' : ''
+                        className={`rounded-lg px-2 py-0.5 -mx-1 underline-offset-4 transition focus:outline-none ${
+                          openPathDropdown === 'subtask'
+                            ? 'bg-white/10 ring-1 ring-white/25 underline font-bold'
+                            : 'hover:bg-white/[0.06] hover:underline'
                         }`}
                       >
                         {activeSubtask.title}
@@ -930,9 +997,23 @@ export function HomeView({
                   >
                     {openPathDropdown === 'project' && activeBoard && (
                       <div className="space-y-1">
-                        <p className="px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">
-                          Projects in {activeBoard.name}
-                        </p>
+                        <div className="px-3 py-2 mb-1.5 flex items-center flex-wrap gap-1.5 border-b border-white/10">
+                          <span
+                            className="px-2 py-0.5 rounded-md font-black tracking-wider text-xs border"
+                            style={getHeaderBadgeStyle(activeBoard.color)}
+                          >
+                            PROJECTS
+                          </span>
+                          <span className="font-bold text-zinc-300 text-[11px] tracking-wider uppercase">
+                            IN
+                          </span>
+                          <span
+                            className="font-bold truncate text-xs"
+                            style={{ color: activeBoard.color || '#FFFFFF' }}
+                          >
+                            {activeBoard.name}
+                          </span>
+                        </div>
                         {activeBoard.projects.map((proj) => {
                           const targetTask =
                             proj.tasks.find((t) => !t.completed) ||
@@ -978,9 +1059,20 @@ export function HomeView({
                       activeBoard &&
                       activeProject && (
                         <div className="space-y-1 max-h-64 overflow-y-auto">
-                          <p className="px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">
-                            Tasks in {activeProject.name}
-                          </p>
+                          <div className="px-3 py-2 mb-1.5 flex items-center flex-wrap gap-1.5 border-b border-white/10">
+                            <span
+                              className="px-2 py-0.5 rounded-md font-black tracking-wider text-xs border"
+                              style={getHeaderBadgeStyle(activeBoard?.color)}
+                            >
+                              TASKS
+                            </span>
+                            <span className="font-bold text-zinc-300 text-[11px] tracking-wider uppercase">
+                              IN
+                            </span>
+                            <span className="font-bold text-white truncate text-xs">
+                              {activeProject.name}
+                            </span>
+                          </div>
                           {activeProject.tasks.map((task) => {
                             const isCurrent =
                               task.id === activeTask?.id && !activeSubtask;
@@ -1073,9 +1165,20 @@ export function HomeView({
                       activeProject &&
                       activeTask && (
                         <div className="space-y-1 max-h-64 overflow-y-auto">
-                          <p className="px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">
-                            Subtasks in {activeTask.title}
-                          </p>
+                          <div className="px-3 py-2 mb-1.5 flex items-center flex-wrap gap-1.5 border-b border-white/10">
+                            <span
+                              className="px-2 py-0.5 rounded-md font-black tracking-wider text-xs border"
+                              style={getHeaderBadgeStyle(activeBoard?.color)}
+                            >
+                              SUBTASKS
+                            </span>
+                            <span className="font-bold text-zinc-300 text-[11px] tracking-wider uppercase">
+                              IN
+                            </span>
+                            <span className="font-bold text-white truncate text-xs">
+                              {activeTask.title}
+                            </span>
+                          </div>
                           <button
                             type="button"
                             onClick={() => {
@@ -1169,6 +1272,18 @@ export function HomeView({
                   </>
                 )}
               </button>
+
+              {hasActiveSession && (
+                <button
+                  type="button"
+                  onClick={onEndSession}
+                  aria-label="end session"
+                  className="inline-flex items-center justify-center gap-2 rounded-full border border-rose-400/35 bg-rose-500/15 hover:bg-rose-500/25 text-rose-200 h-14 px-6 text-sm font-semibold transition"
+                >
+                  <Square className="w-3.5 h-3.5 fill-current" />
+                  <span>end session</span>
+                </button>
+              )}
 
               <button
                 type="button"

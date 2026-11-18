@@ -1,5 +1,7 @@
 export interface User {
   id: number;
+  email: string;
+  name?: string | null;
   username: string;
   created_at?: string;
 }
@@ -19,8 +21,30 @@ export interface Task {
   title: string;
   completed: boolean;
   time_spent_seconds: number;
+  scheduled_date?: string | null;
+  scheduled_time?: string | null;
+  scheduled_duration_minutes?: number;
   created_at?: string;
   subtasks: Subtask[];
+}
+
+export interface FocusSession {
+  id: number;
+  user_id: number;
+  board_id: number | null;
+  project_id: number | null;
+  task_id: number | null;
+  subtask_id: number | null;
+  task_title: string;
+  subtask_title?: string | null;
+  project_name: string;
+  board_name: string;
+  board_color: string;
+  mode: TimerMode;
+  duration_seconds: number;
+  started_at: string;
+  ended_at: string;
+  session_date: string;
 }
 
 export interface Project {
