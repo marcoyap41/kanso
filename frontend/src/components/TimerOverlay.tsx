@@ -143,7 +143,7 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
       targetWin.document.title = 'kanso — focus timer';
       targetWin.document.body.innerHTML = '';
       targetWin.document.body.style.margin = '0';
-      targetWin.document.body.style.backgroundColor = '#0A0A0C';
+      targetWin.document.body.style.backgroundColor = '#070709';
       targetWin.document.body.style.color = '#FFFFFF';
       targetWin.document.body.style.fontFamily =
         'system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
@@ -169,7 +169,7 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
 
       const root = targetWin.document.createElement('div');
       root.style.minHeight = '100vh';
-      root.style.backgroundColor = '#0A0A0C';
+      root.style.backgroundColor = '#070709';
       root.style.color = '#FFFFFF';
       targetWin.document.body.appendChild(root);
 
@@ -213,7 +213,7 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
         : false;
 
     const pipContent = (
-      <div className="min-h-screen bg-[#0A0A0C] text-white p-4 flex flex-col justify-between select-none">
+      <div className="min-h-screen bg-[#070709] text-white p-4 flex flex-col justify-between select-none">
         <div>
           <div className="flex items-center justify-between gap-2 mb-2">
             <div className="flex items-center gap-2 min-w-0">
@@ -225,7 +225,7 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
                 {contextLine || 'kanso'}
               </span>
             </div>
-            <span className="rounded-full border border-white/10 bg-[#16161B] px-2.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-zinc-300 shrink-0">
+            <span className="rounded-full border border-white/10 bg-white/[0.06] px-2.5 py-0.5 text-[10px] text-zinc-300 shrink-0">
               {mode === 'pomodoro'
                 ? pomodoroPhase === 'work'
                   ? 'Focus'
@@ -238,18 +238,18 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
           </p>
         </div>
 
-        <div className="my-2 text-center">
-          <div className="text-5xl font-mono font-bold tracking-tight text-white tabular-nums">
+        <div className="my-2 rounded-2xl border border-white/[0.06] bg-[#0A0A0C] py-3 text-center">
+          <div className="text-4xl font-mono font-bold tracking-tight text-white tabular-nums">
             {formatTimerClock(displaySeconds)}
           </div>
         </div>
 
         <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <button
               type="button"
               onClick={onToggleRun}
-              className="inline-flex items-center gap-1.5 rounded-full bg-white text-[#0A0A0C] px-4 py-2 text-xs font-semibold hover:bg-zinc-200 transition"
+              className="inline-flex items-center gap-1.5 rounded-full bg-white text-[#0A0A0C] px-3.5 py-2 text-xs font-semibold hover:bg-zinc-200 transition"
             >
               {isRunning ? (
                 <>
@@ -267,7 +267,7 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
             <button
               type="button"
               onClick={onReset}
-              className="rounded-full border border-white/10 bg-[#17171D] p-2 text-zinc-300 hover:text-white transition"
+              className="rounded-full border border-white/15 bg-white/[0.04] p-2 text-zinc-300 hover:border-white/35 hover:text-white transition"
               title="Reset timer"
             >
               <RotateCcw className="w-3.5 h-3.5" />
@@ -278,7 +278,7 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
                 type="button"
                 onClick={onEndSession}
                 title="End session and save log"
-                className="inline-flex items-center gap-1 rounded-full border border-rose-400/35 bg-rose-500/15 hover:bg-rose-500/25 px-3 py-2 text-xs font-semibold text-rose-200 transition"
+                className="inline-flex items-center gap-1 rounded-full border border-rose-400/35 bg-rose-500/15 hover:bg-rose-500/25 px-2.5 py-2 text-xs font-semibold text-rose-200 transition"
               >
                 <Square className="w-3 h-3 fill-current" />
                 <span>End</span>
@@ -293,8 +293,8 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
             title={isTargetCompleted ? 'Unmark as Done' : 'Mark as Done'}
             className={`inline-flex items-center gap-1 rounded-full border px-3 py-2 text-xs font-medium transition ${
               isTargetCompleted
-                ? 'border-emerald-400/40 bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30'
-                : 'border-white/15 bg-[#17171D] hover:bg-emerald-500/20 hover:border-emerald-400/40 disabled:opacity-40 text-zinc-200'
+                ? 'border-emerald-400/45 bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30'
+                : 'border-white/15 bg-white/[0.04] hover:bg-emerald-500/20 hover:border-emerald-400/45 disabled:opacity-40 text-zinc-200'
             }`}
           >
             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
@@ -316,16 +316,16 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 20, scale: 0.96 }}
             transition={{ duration: 0.25 }}
-            className="fixed bottom-6 right-6 z-50 w-[330px] sm:w-[360px] rounded-3xl border border-white/15 bg-[#121216]/95 backdrop-blur-xl shadow-[0_24px_80px_rgba(0,0,0,0.8)] overflow-hidden"
+            className="fixed bottom-6 right-6 z-50 w-[330px] sm:w-[360px] rounded-3xl border border-white/15 bg-[#121216]/95 backdrop-blur-xl shadow-[0_24px_80px_rgba(0,0,0,0.85)] overflow-hidden"
           >
-            <div className="flex items-center justify-between gap-2 px-4 py-3 border-b border-white/[0.08] cursor-grab active:cursor-grabbing bg-white/[0.02]">
+            <div className="flex items-center justify-between gap-2 px-4 py-3 border-b border-white/[0.08] cursor-grab active:cursor-grabbing bg-white/[0.03]">
               <div className="flex items-center gap-2 min-w-0">
                 <GripHorizontal className="w-4 h-4 text-zinc-500 shrink-0" />
                 <span
                   className="h-2.5 w-2.5 rounded-full shrink-0"
                   style={{ backgroundColor: accentColor }}
                 />
-                <span className="text-[11px] font-medium text-zinc-400 truncate">
+                <span className="text-xs font-medium text-zinc-400 truncate">
                   {contextLine || 'Focus Widget'}
                 </span>
               </div>
@@ -358,10 +358,18 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
                 <button
                   type="button"
                   onClick={() => {
-                    closePopoutWindow();
-                    onClose();
+                    if (hasActiveSession) {
+                      onEndSession();
+                    } else {
+                      closePopoutWindow();
+                      onClose();
+                    }
                   }}
-                  title="Hide timer widget"
+                  title={
+                    hasActiveSession
+                      ? 'End current session'
+                      : 'Close timer widget'
+                  }
                   className="rounded-lg p-1.5 text-zinc-400 hover:bg-rose-500/20 hover:text-rose-300 transition"
                 >
                   <X className="w-3.5 h-3.5" />
@@ -395,14 +403,14 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
               <div className="p-4 space-y-4">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
-                    <p className="text-[11px] uppercase tracking-wider text-zinc-500">
+                    <p className="text-xs font-medium text-zinc-500">
                       {subtask ? 'Active Subtask' : 'Active Task'}
                     </p>
                     <h3 className="text-sm font-bold text-white truncate mt-0.5">
                       {targetTitle}
                     </h3>
                   </div>
-                  <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-[#1B1B22] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-300 shrink-0">
+                  <span className="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/[0.05] px-2.5 py-1 text-xs text-zinc-300 shrink-0">
                     <Timer className="w-3 h-3 text-zinc-400" />
                     {mode === 'pomodoro'
                       ? pomodoroPhase === 'work'
@@ -427,10 +435,10 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
                         onClick={() =>
                           onChangeConfig({ mode: 'pomodoro', preset })
                         }
-                        className={`rounded-full px-2.5 py-1 text-[11px] font-medium border transition ${
+                        className={`rounded-full px-3 py-1 text-xs border transition ${
                           mode === 'pomodoro' && pomodoroPreset === preset
                             ? 'bg-white text-[#0A0A0C] border-white font-semibold'
-                            : 'bg-[#18181E] text-zinc-400 border-white/10 hover:text-white'
+                            : 'bg-white/[0.04] text-zinc-400 border-white/10 hover:text-white'
                         }`}
                       >
                         {preset === 'custom' ? 'Custom' : preset}
@@ -440,10 +448,10 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
                   <button
                     type="button"
                     onClick={() => onChangeConfig({ mode: 'normal' })}
-                    className={`rounded-full px-2.5 py-1 text-[11px] font-medium border transition ${
+                    className={`rounded-full px-3 py-1 text-xs border transition ${
                       mode === 'normal'
                         ? 'bg-white text-[#0A0A0C] border-white font-semibold'
-                        : 'bg-[#18181E] text-zinc-400 border-white/10 hover:text-white'
+                        : 'bg-white/[0.04] text-zinc-400 border-white/10 hover:text-white'
                     }`}
                   >
                     Normal
@@ -451,8 +459,10 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
                 </div>
 
                 {mode === 'pomodoro' && pomodoroPreset === 'custom' && (
-                  <div className="flex items-center justify-between gap-2 rounded-xl border border-white/[0.07] bg-[#0A0A0C] px-3 py-2 text-xs">
-                    <span className="text-zinc-400">Work / Break (min)</span>
+                  <div className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs">
+                    <span className="text-zinc-400 text-[11px]">
+                      Work / Break (min)
+                    </span>
                     <div className="flex items-center gap-1.5">
                       <input
                         type="number"
@@ -467,7 +477,7 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
                             ),
                           })
                         }
-                        className="w-12 rounded-md border border-white/15 bg-[#16161B] px-1.5 py-0.5 text-center font-mono text-white focus:outline-none"
+                        className="w-12 rounded-md border border-white/15 bg-[#0A0A0C] px-1.5 py-0.5 text-center font-mono text-white focus:outline-none"
                       />
                       <span className="text-zinc-500">:</span>
                       <input
@@ -483,18 +493,18 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
                             ),
                           })
                         }
-                        className="w-12 rounded-md border border-white/15 bg-[#16161B] px-1.5 py-0.5 text-center font-mono text-white focus:outline-none"
+                        className="w-12 rounded-md border border-white/15 bg-[#0A0A0C] px-1.5 py-0.5 text-center font-mono text-white focus:outline-none"
                       />
                     </div>
                   </div>
                 )}
 
                 <div className="flex items-center justify-between gap-2 pt-1">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5">
                     <button
                       type="button"
                       onClick={onToggleRun}
-                      className="inline-flex items-center gap-1.5 rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 px-4 py-2 text-xs font-semibold shadow-[0_0_20px_rgba(255,255,255,0.14)] transition"
+                      className="inline-flex items-center gap-1.5 rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 px-3.5 py-2 text-xs font-semibold shadow-[0_0_20px_rgba(255,255,255,0.14)] transition"
                     >
                       {isRunning ? (
                         <>
@@ -513,7 +523,7 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
                       type="button"
                       onClick={onReset}
                       title="Reset timer"
-                      className="rounded-full border border-white/10 bg-[#1A1A20] hover:bg-[#23232B] p-2 text-zinc-300 hover:text-white transition"
+                      className="rounded-full border border-white/15 bg-white/[0.04] hover:border-white/35 p-2 text-zinc-300 hover:text-white transition"
                     >
                       <RotateCcw className="w-3.5 h-3.5" />
                     </button>
@@ -523,7 +533,7 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
                         type="button"
                         onClick={onEndSession}
                         title="End session and save log"
-                        className="inline-flex items-center gap-1 rounded-full border border-rose-400/35 bg-rose-500/15 hover:bg-rose-500/25 px-3 py-2 text-xs font-semibold text-rose-200 transition"
+                        className="inline-flex items-center gap-1 rounded-full border border-rose-400/35 bg-rose-500/15 hover:bg-rose-500/25 px-2.5 py-2 text-xs font-semibold text-rose-200 transition"
                       >
                         <Square className="w-3 h-3 fill-current" />
                         <span>End</span>
@@ -536,10 +546,10 @@ export const TimerOverlay = forwardRef<TimerOverlayHandle, TimerOverlayProps>(
                     onClick={onCompleteTarget}
                     disabled={!task}
                     title={isTargetCompleted ? 'Unmark as Done' : 'Mark as Done'}
-                    className={`inline-flex items-center gap-1.5 rounded-full border px-3.5 py-2 text-xs font-medium transition ${
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-2 text-xs font-medium transition ${
                       isTargetCompleted
-                        ? 'border-emerald-400/40 bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30'
-                        : 'border-white/15 bg-[#1A1A20] hover:bg-emerald-500/20 hover:border-emerald-400/40 disabled:opacity-40 text-zinc-200'
+                        ? 'border-emerald-400/45 bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30'
+                        : 'border-white/15 bg-white/[0.04] hover:bg-emerald-500/20 hover:border-emerald-400/45 disabled:opacity-40 text-zinc-200'
                     }`}
                   >
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />

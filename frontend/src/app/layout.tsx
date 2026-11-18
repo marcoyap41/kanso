@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { KansoCursor } from '@/components/KansoCursor';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -26,7 +27,8 @@ export default function RootLayout({
           rel="stylesheet"
         />
       </head>
-      <body className="min-h-screen bg-[#0A0A0C] text-white antialiased selection:bg-white selection:text-[#0A0A0C]">
+      <body className="min-h-screen bg-[#070709] text-white antialiased selection:bg-white selection:text-[#070709]">
+        <KansoCursor />
         {children}
       </body>
     </html>

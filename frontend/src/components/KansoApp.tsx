@@ -2,7 +2,16 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Calendar, Home, Layers, LogOut, Timer } from 'lucide-react';
+import {
+  Calendar,
+  ChevronDown,
+  Crosshair,
+  Home,
+  Layers,
+  LogOut,
+  Pencil,
+  Timer,
+} from 'lucide-react';
 import { api } from '@/lib/api';
 import { formatTimerClock, playZenChime, toLocalDateKey } from '@/lib/time';
 import type {
@@ -15,14 +24,21 @@ import type {
   TimerMode,
   User,
 } from '@/types/kanso';
+import { AmbientBackdrop } from './AmbientBackdrop';
 import { CalendarView } from './CalendarView';
 import { HomeView } from './HomeView';
+import {
+  getCustomCursorEnabled,
+  setCustomCursorEnabled,
+} from './KansoCursor';
 import { KansoLogo } from './KansoLogo';
+import { NameOnboardingScreen } from './NameOnboardingScreen';
 import { TaskManagementView } from './TaskManagementView';
 import { TimerOverlay, type TimerOverlayHandle } from './TimerOverlay';
 
 interface KansoAppProps {
   user: User;
+  onUserUpdated: (user: User) => void;
   onLogout: () => void;
 }
 
@@ -61,7 +77,7 @@ function getPomodoroDurations(
   };
 }
 
-export function KansoApp({ user, onLogout }: KansoAppProps) {
+export function KansoApp({ user, onUserUpdated, onLogout }: KansoAppProps) {
   // Spatial navigation: 0 (Task Management) <- 1 (Home) -> 2 (Calendar)
   const [[pageIndex, direction], setPageTuple] = useState<[PageIndex, number]>([
     1, 0,
@@ -70,6 +86,35 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
   const [boards, setBoards] = useState<TaskBoard[]>([]);
   const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
   const [loadingHierarchy, setLoadingHierarchy] = useState(true);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [editingNameOpen, setEditingNameOpen] = useState(false);
+  const [customCursorOn, setCustomCursorOn] = useState(false);
+  const userMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setCustomCursorOn(getCustomCursorEnabled());
+  }, []);
+
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const handleOutside = (e: MouseEvent) => {
+      if (
+        userMenuRef.current &&
+        !userMenuRef.current.contains(e.target as Node)
+      ) {
+        setUserMenuOpen(false);
+      }
+    };
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setUserMenuOpen(false);
+    };
+    window.addEventListener('mousedown', handleOutside);
+    window.addEventListener('keydown', handleEsc);
+    return () => {
+      window.removeEventListener('mousedown', handleOutside);
+      window.removeEventListener('keydown', handleEsc);
+    };
+  }, [userMenuOpen]);
   const [selection, setSelection] = useState<FocusSelection>({
     boardId: null,
     projectId: null,
@@ -80,6 +125,7 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
   // Main page working mode + optional floating overlay state
   const [isWorkingMode, setIsWorkingMode] = useState(false);
   const [forceOverlay, setForceOverlay] = useState(false);
+  const [overlayDismissed, setOverlayDismissed] = useState(false);
 
   // Persistent timer state across views
   const [timerMode, setTimerMode] = useState<TimerMode>('pomodoro');
@@ -168,8 +214,11 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
   }, [timerMode]);
 
   useEffect(() => {
-    if (isRunning && !sessionStartedAtRef.current) {
-      sessionStartedAtRef.current = new Date().toISOString();
+    if (isRunning) {
+      setOverlayDismissed(false);
+      if (!sessionStartedAtRef.current) {
+        sessionStartedAtRef.current = new Date().toISOString();
+      }
     }
   }, [isRunning]);
 
@@ -369,6 +418,7 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
         subtaskId: nextSelection.subtaskId,
       };
       resetTimerClock();
+      setOverlayDismissed(false);
       setIsWorkingMode(true);
       navigateTo(1);
       if (autoStart) {
@@ -426,27 +476,35 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
     timerMode === 'pomodoro' ? remainingSeconds : elapsedSeconds;
 
   const overlayVisible =
-    (isWorkingMode && pageIndex !== 1) || forceOverlay;
+    isWorkingMode && (forceOverlay || (pageIndex !== 1 && !overlayDismissed));
 
   return (
-    <div className="relative min-h-screen bg-[#0A0A0C] text-white flex flex-col overflow-x-hidden">
-      {/* Top Navigation Bar */}
-      <header className="relative z-20 flex flex-wrap items-center justify-between gap-4 px-5 sm:px-10 py-5 border-b border-white/[0.06] bg-[#0A0A0C]/80 backdrop-blur-md">
+    <div className="relative min-h-screen bg-[#070709] text-white flex flex-col overflow-x-hidden">
+      <AmbientBackdrop
+        boards={boards}
+        pageIndex={pageIndex}
+        isWorkingMode={isWorkingMode}
+        isRunning={isRunning}
+        activeColor={resolved.board?.color ?? null}
+      />
+
+      {/* Top HUD Bar */}
+      <header className="relative z-20 flex flex-wrap items-center justify-between gap-4 px-5 sm:px-10 py-4 border-b border-white/[0.08] bg-[#070709]/85 backdrop-blur-md">
         <KansoLogo onClick={() => navigateTo(1)} />
 
-        {/* Center Spatial Switcher: Task Management <- Home -> Calendar (Icon-only) */}
+        {/* Center Spatial Switcher: Task Management <- Home -> Calendar (Icon-only HUD tabs) */}
         <nav
           aria-label="Primary sections"
-          className="order-3 sm:order-2 flex items-center justify-center gap-1 rounded-full border border-white/10 bg-[#121216]/90 p-1"
+          className="order-3 sm:order-2 mx-auto sm:mx-0 sm:absolute sm:left-1/2 sm:-translate-x-1/2 flex items-center justify-center gap-1 rounded-full border border-white/15 bg-white/[0.04] p-1"
         >
           <button
             type="button"
             onClick={() => navigateTo(0)}
             title="Task Management"
             aria-label="Task Management"
-            className={`inline-flex h-9 w-11 items-center justify-center rounded-full transition ${
+            className={`inline-flex h-8 w-11 items-center justify-center rounded-full transition ${
               pageIndex === 0
-                ? 'bg-white text-[#0A0A0C] shadow-[0_0_18px_rgba(255,255,255,0.14)]'
+                ? 'bg-white text-[#070709] shadow-[0_0_16px_rgba(255,255,255,0.28)]'
                 : 'text-zinc-400 hover:text-white hover:bg-white/[0.06]'
             }`}
           >
@@ -458,9 +516,9 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
             onClick={() => navigateTo(1)}
             title="Home"
             aria-label="Home"
-            className={`inline-flex h-9 w-11 items-center justify-center rounded-full transition ${
+            className={`inline-flex h-8 w-11 items-center justify-center rounded-full transition ${
               pageIndex === 1
-                ? 'bg-white text-[#0A0A0C] shadow-[0_0_18px_rgba(255,255,255,0.14)]'
+                ? 'bg-white text-[#070709] shadow-[0_0_16px_rgba(255,255,255,0.28)]'
                 : 'text-zinc-400 hover:text-white hover:bg-white/[0.06]'
             }`}
           >
@@ -472,9 +530,9 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
             onClick={() => navigateTo(2)}
             title="Calendar"
             aria-label="Calendar"
-            className={`inline-flex h-9 w-11 items-center justify-center rounded-full transition ${
+            className={`inline-flex h-8 w-11 items-center justify-center rounded-full transition ${
               pageIndex === 2
-                ? 'bg-white text-[#0A0A0C] shadow-[0_0_18px_rgba(255,255,255,0.14)]'
+                ? 'bg-white text-[#070709] shadow-[0_0_16px_rgba(255,255,255,0.28)]'
                 : 'text-zinc-400 hover:text-white hover:bg-white/[0.06]'
             }`}
           >
@@ -482,14 +540,22 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
           </button>
         </nav>
 
-        {/* Right Controls: Live Timer Pill (only when active) + User & Logout */}
+        {/* Right Controls: Live Timer HUD + User Menu */}
         <div className="order-2 sm:order-3 flex items-center gap-2.5">
           {isWorkingMode && (
             <button
               type="button"
-              onClick={() => setForceOverlay((prev) => !prev)}
+              onClick={() => {
+                if (overlayVisible) {
+                  setForceOverlay(false);
+                  setOverlayDismissed(true);
+                } else {
+                  setForceOverlay(true);
+                  setOverlayDismissed(false);
+                }
+              }}
               title="Toggle floating timer widget"
-              className="inline-flex items-center gap-1.5 rounded-full border border-white/15 bg-[#17171D] hover:border-white/30 px-3.5 py-1.5 text-xs font-mono text-white transition"
+              className="inline-flex items-center gap-1.5 rounded-full border border-white/20 bg-white/[0.05] hover:border-white/40 px-3.5 py-1.5 text-xs font-mono text-white transition"
             >
               <span
                 className={`h-2 w-2 rounded-full ${
@@ -501,19 +567,88 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
             </button>
           )}
 
-          <button
-            type="button"
-            onClick={() => {
-              void handleEndSession().finally(() => {
-                onLogout();
-              });
-            }}
-            title="Sign out"
-            className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-[#141418] hover:bg-white hover:text-[#0A0A0C] px-4 py-1.5 text-xs font-medium text-zinc-200 transition"
-          >
-            <span>{user.name || user.username || user.email}</span>
-            <LogOut className="w-3.5 h-3.5" />
-          </button>
+          <div ref={userMenuRef} className="relative">
+            <button
+              type="button"
+              onClick={() => setUserMenuOpen((prev) => !prev)}
+              aria-expanded={userMenuOpen}
+              aria-haspopup="menu"
+              className="inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/[0.04] hover:border-white/40 px-3.5 py-1.5 text-xs font-medium text-zinc-200 transition"
+            >
+              <span>{user.name || user.username || user.email}</span>
+              <ChevronDown
+                className={`w-3.5 h-3.5 text-zinc-400 transition-transform ${
+                  userMenuOpen ? 'rotate-180' : ''
+                }`}
+              />
+            </button>
+
+            <AnimatePresence>
+              {userMenuOpen && (
+                <motion.div
+                  role="menu"
+                  initial={{ opacity: 0, y: -6, scale: 0.96 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -6, scale: 0.96 }}
+                  transition={{ duration: 0.16 }}
+                  className="absolute right-0 mt-2 w-48 rounded-2xl border border-white/15 bg-[#0D0E12]/95 backdrop-blur-xl p-1.5 shadow-[0_20px_60px_rgba(0,0,0,0.85)] z-50 space-y-1"
+                >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setUserMenuOpen(false);
+                      setEditingNameOpen(true);
+                    }}
+                    className="w-full flex items-center justify-between gap-2 rounded-xl px-3 py-2 text-xs font-medium text-zinc-200 hover:bg-white/[0.08] hover:text-white transition"
+                  >
+                    <span>Change name</span>
+                    <Pencil className="w-3.5 h-3.5 text-zinc-400" />
+                  </button>
+
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      const next = !customCursorOn;
+                      setCustomCursorOn(next);
+                      setCustomCursorEnabled(next);
+                    }}
+                    className="w-full flex items-center justify-between gap-2 rounded-xl px-3 py-2 text-xs font-medium text-zinc-200 hover:bg-white/[0.08] hover:text-white transition"
+                  >
+                    <span>Custom cursor</span>
+                    <span className="inline-flex items-center gap-1.5">
+                      <span
+                        className={`rounded-full px-1.5 py-0.5 text-[10px] font-mono ${
+                          customCursorOn
+                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/40'
+                            : 'bg-white/[0.06] text-zinc-400 border border-white/10'
+                        }`}
+                      >
+                        {customCursorOn ? 'On' : 'Off'}
+                      </span>
+                      <Crosshair className="w-3.5 h-3.5 text-zinc-400" />
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setUserMenuOpen(false);
+                      void handleEndSession().finally(() => {
+                        onLogout();
+                      });
+                    }}
+                    className="w-full flex items-center justify-between gap-2 rounded-xl border border-rose-500/40 bg-rose-500/15 hover:bg-rose-500 hover:text-white px-3 py-2 text-xs font-semibold text-rose-300 transition"
+                  >
+                    <span>Sign out</span>
+                    <LogOut className="w-3.5 h-3.5" />
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
         </div>
       </header>
 
@@ -521,7 +656,7 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
       <main className="relative z-10 flex-1 overflow-x-hidden">
         {loadingHierarchy ? (
           <div className="flex min-h-[calc(100vh-120px)] items-center justify-center">
-            <div className="flex items-center gap-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
+            <div className="flex items-center gap-3 text-xs font-mono tracking-wide text-zinc-500">
               <span className="h-2 w-2 rounded-full bg-white animate-ping" />
               <span>Loading kanso</span>
             </div>
@@ -603,9 +738,7 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
         visible={overlayVisible}
         onClose={() => {
           setForceOverlay(false);
-          if (pageIndex !== 1) {
-            void handleEndSession();
-          }
+          setOverlayDismissed(true);
         }}
         board={resolved.board}
         project={resolved.project}
@@ -625,6 +758,17 @@ export function KansoApp({ user, onLogout }: KansoAppProps) {
         onChangeConfig={handleChangeTimerConfig}
         onCompleteTarget={() => void handleCompleteTarget()}
       />
+
+      {editingNameOpen && (
+        <NameOnboardingScreen
+          initialName={user.name || ''}
+          onCompleted={(updated) => {
+            onUserUpdated(updated);
+            setEditingNameOpen(false);
+          }}
+          onCancel={() => setEditingNameOpen(false)}
+        />
+      )}
     </div>
   );
 }

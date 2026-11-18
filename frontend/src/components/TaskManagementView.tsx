@@ -75,7 +75,9 @@ export function TaskManagementView({
   const [schedulingTaskId, setSchedulingTaskId] = useState<number | null>(null);
   const [scheduleDateDraft, setScheduleDateDraft] = useState('');
   const [scheduleTimeDraft, setScheduleTimeDraft] = useState('');
-  const [scheduleDurationDraft, setScheduleDurationDraft] = useState(60);
+  const [scheduleDurationDraft, setScheduleDurationDraft] = useState<
+    number | null
+  >(null);
 
   const activeBoard =
     boards.find((b) => b.id === selectedBoardId) || boards[0] || null;
@@ -216,7 +218,7 @@ export function TaskManagementView({
     setSchedulingTaskId(task.id);
     setScheduleDateDraft(task.scheduled_date || toLocalDateKey(new Date()));
     setScheduleTimeDraft(task.scheduled_time || '');
-    setScheduleDurationDraft(task.scheduled_duration_minutes || 60);
+    setScheduleDurationDraft(task.scheduled_duration_minutes ?? null);
   }
 
   async function handleSaveSchedule(e: React.FormEvent, taskId: number) {
@@ -236,29 +238,46 @@ export function TaskManagementView({
       await api.updateTask(taskId, {
         scheduled_date: null,
         scheduled_time: null,
+        scheduled_duration_minutes: null,
       });
       setSchedulingTaskId(null);
     });
   }
 
   return (
-    <div className="relative z-10 w-full max-w-6xl mx-auto px-5 sm:px-8 pt-6 pb-24">
+    <div className="relative z-10 w-full max-w-6xl mx-auto px-5 sm:px-8 pt-14 sm:pt-16 pb-28">
       {/* Page Title & Hierarchy Legend */}
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-8">
         <div>
-          <p className="text-xs font-medium uppercase tracking-[0.18em] text-zinc-500 mb-2">
-            Big Picture → Micro-Steps
+          <p className="text-[10px] font-mono uppercase tracking-[0.24em] text-zinc-500 mb-2">
+            SYSTEM_TREE // BOARD → PROJECT → TASK → SUBTASK
           </p>
-          <h1 className="text-3xl sm:text-5xl font-bold tracking-[-0.03em] text-white">
-            Task Management
+          <h1 className="text-3xl sm:text-5xl font-bold tracking-[-0.03em] text-white inline-flex items-center gap-2">
+            <span>Task Management</span>
+            <span
+              aria-hidden="true"
+              className="inline-block w-[3px] h-7 sm:h-10 bg-white rounded-[1px] shadow-[0_0_10px_rgba(255,255,255,0.9)] animate-kanso-caret"
+            />
           </h1>
-          <p className="text-sm text-zinc-400 mt-2">
-            Task Board (max 5) → Project → Task → Subtask (optional)
+          <div
+            aria-hidden="true"
+            className="mt-2.5 flex items-center gap-1.5"
+          >
+            {Array.from({ length: 6 }).map((_, i) => (
+              <span
+                key={i}
+                className="h-1 w-1 rounded-full bg-zinc-500/80"
+              />
+            ))}
+          </div>
+          <p className="text-xs text-zinc-500 mt-2">
+            Configure up to 5 color-coded Task Boards to structure your focus
+            sessions
           </p>
         </div>
 
         <div className="flex items-center gap-2.5">
-          <span className="rounded-full border border-white/10 bg-[#141418] px-3.5 py-1.5 text-xs font-mono text-zinc-300">
+          <span className="rounded-full border border-white/15 bg-white/[0.04] px-3.5 py-2 text-xs font-mono text-zinc-300">
             {boards.length} / {MAX_TASK_BOARDS} Boards
           </span>
           <button
@@ -270,7 +289,7 @@ export function TaskManagementView({
                 ? 'Create a new Task Board'
                 : 'Maximum of 5 Task Boards reached'
             }
-            className="inline-flex items-center gap-1.5 rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 disabled:opacity-40 disabled:cursor-not-allowed px-4 py-2 text-xs font-semibold shadow-[0_0_24px_rgba(255,255,255,0.12)] transition"
+            className="inline-flex items-center gap-1.5 rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 disabled:opacity-40 disabled:cursor-not-allowed px-4 py-2 text-xs font-semibold transition"
           >
             <Plus className="w-3.5 h-3.5" />
             <span>New Board</span>
@@ -279,7 +298,7 @@ export function TaskManagementView({
       </div>
 
       {error && (
-        <div className="mb-5 flex items-center justify-between rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-2.5 text-xs text-rose-200">
+        <div className="mb-5 flex items-center justify-between rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-xs text-rose-200">
           <span>{error}</span>
           <button
             type="button"
@@ -295,7 +314,7 @@ export function TaskManagementView({
       {creatingBoard && (
         <form
           onSubmit={handleCreateBoard}
-          className="mb-6 rounded-3xl border border-white/15 bg-[#131318] p-5 shadow-2xl"
+          className="mb-6 rounded-3xl border border-white/15 bg-[#121216] p-5 shadow-2xl"
         >
           <div className="flex flex-col md:flex-row md:items-end gap-4">
             <div className="flex-1">
@@ -308,7 +327,7 @@ export function TaskManagementView({
                 value={newBoardName}
                 onChange={(e) => setNewBoardName(e.target.value)}
                 placeholder="e.g. College, Startup, Health, Personal"
-                className="w-full rounded-xl border border-white/10 bg-[#0A0A0C] px-3.5 py-2.5 text-sm text-white placeholder:text-zinc-600 focus:border-white/30 focus:outline-none"
+                className="w-full rounded-xl border border-white/15 bg-white/[0.07] px-3.5 py-2.5 text-sm text-white placeholder:text-zinc-600 focus:border-white/40 focus:outline-none"
               />
             </div>
 
@@ -316,7 +335,7 @@ export function TaskManagementView({
               <label className="block text-xs font-medium text-zinc-400 mb-1.5">
                 Assign Color
               </label>
-              <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-[#0A0A0C] px-3 py-2">
+              <div className="flex items-center gap-2 rounded-xl border border-white/15 bg-white/[0.05] px-3 py-2">
                 {BOARD_COLOR_PALETTE.map((c) => (
                   <button
                     key={c.hex}
@@ -325,7 +344,7 @@ export function TaskManagementView({
                     title={c.label}
                     className={`h-5 w-5 rounded-full transition-transform ${
                       newBoardColor === c.hex
-                        ? 'scale-125 ring-2 ring-white ring-offset-2 ring-offset-[#0A0A0C]'
+                        ? 'scale-110 ring-2 ring-white ring-offset-2 ring-offset-[#070709]'
                         : 'opacity-70 hover:opacity-100'
                     }`}
                     style={{ backgroundColor: c.hex }}
@@ -345,7 +364,7 @@ export function TaskManagementView({
               <button
                 type="button"
                 onClick={() => setCreatingBoard(false)}
-                className="rounded-full border border-white/10 bg-[#1A1A20] px-4 py-2.5 text-xs text-zinc-300 hover:text-white transition"
+                className="rounded-full border border-white/15 bg-white/[0.03] px-4 py-2.5 text-xs text-zinc-300 hover:text-white transition"
               >
                 Cancel
               </button>
@@ -369,14 +388,14 @@ export function TaskManagementView({
               <form
                 key={board.id}
                 onSubmit={(e) => handleSaveBoardEdit(e, board.id)}
-                className="rounded-2xl border border-white/25 bg-[#15151B] p-3.5 space-y-2.5"
+                className="rounded-2xl border border-white/30 bg-[#121216] p-3.5 space-y-2.5"
               >
                 <input
                   type="text"
                   required
                   value={editBoardName}
                   onChange={(e) => setEditBoardName(e.target.value)}
-                  className="w-full rounded-lg border border-white/15 bg-[#0A0A0C] px-2.5 py-1.5 text-xs text-white focus:outline-none"
+                  className="w-full rounded-lg border border-white/20 bg-white/[0.07] px-2.5 py-1.5 text-xs text-white focus:outline-none"
                 />
                 <div className="flex items-center gap-1.5 flex-wrap">
                   {BOARD_COLOR_PALETTE.map((c) => (
@@ -386,7 +405,7 @@ export function TaskManagementView({
                       onClick={() => setEditBoardColor(c.hex)}
                       className={`h-4 w-4 rounded-full ${
                         editBoardColor === c.hex
-                          ? 'ring-2 ring-white ring-offset-1 ring-offset-[#15151B]'
+                          ? 'ring-2 ring-white ring-offset-1 ring-offset-[#121216]'
                           : 'opacity-70'
                       }`}
                       style={{ backgroundColor: c.hex }}
@@ -403,7 +422,7 @@ export function TaskManagementView({
                   <button
                     type="button"
                     onClick={() => setEditingBoardId(null)}
-                    className="rounded-full border border-white/10 px-2.5 py-1 text-[11px] text-zinc-400"
+                    className="rounded-full border border-white/15 px-2.5 py-1 text-[11px] text-zinc-400"
                   >
                     Cancel
                   </button>
@@ -423,10 +442,13 @@ export function TaskManagementView({
                   setSelectedBoardId(board.id);
                 }
               }}
+              style={{
+                borderColor: isSelected ? `${board.color}75` : `${board.color}35`,
+              }}
               className={`group relative cursor-pointer rounded-2xl border p-4 transition-all ${
                 isSelected
-                  ? 'border-white/30 bg-[#17171D] shadow-[0_12px_36px_rgba(0,0,0,0.45)]'
-                  : 'border-white/[0.08] bg-[#111115] hover:border-white/20 hover:bg-[#141419]'
+                  ? 'bg-[#14141A] shadow-[0_12px_36px_rgba(0,0,0,0.55)]'
+                  : 'bg-[#121216]/85 hover:!border-white/30 hover:bg-[#14141A]'
               }`}
             >
               {/* Top color bar */}
@@ -439,10 +461,10 @@ export function TaskManagementView({
                   <h2 className="text-sm font-semibold text-white truncate">
                     {board.name}
                   </h2>
-                  <p className="text-[11px] text-zinc-500 mt-0.5">
-                    {board.projects.length} project
-                    {board.projects.length === 1 ? '' : 's'} · {totalTasks} task
-                    {totalTasks === 1 ? '' : 's'}
+                  <p className="text-[11px] font-mono text-zinc-500 mt-0.5">
+                    {board.projects.length}{' '}
+                    {board.projects.length === 1 ? 'project' : 'projects'} ·{' '}
+                    {totalTasks} {totalTasks === 1 ? 'task' : 'tasks'}
                   </p>
                 </div>
               </div>
@@ -478,7 +500,7 @@ export function TaskManagementView({
         })}
 
         {boards.length === 0 && (
-          <div className="col-span-full rounded-2xl border border-dashed border-white/15 p-8 text-center text-sm text-zinc-400">
+          <div className="col-span-full rounded-2xl border border-dashed border-white/15 bg-white/[0.02] p-8 text-center text-sm text-zinc-400">
             Click <strong className="text-white">New Board</strong> above to
             create your first Task Board (up to 5).
           </div>
@@ -487,12 +509,18 @@ export function TaskManagementView({
 
       {/* Selected Board Workspace: Projects -> Tasks -> Subtasks */}
       {activeBoard && (
-        <section className="rounded-3xl border border-white/10 bg-[#111115]/90 backdrop-blur-xl p-5 sm:p-7">
+        <section
+          style={{ borderColor: `${activeBoard.color}35` }}
+          className="rounded-3xl border bg-[#121216]/90 backdrop-blur-xl p-5 sm:p-7"
+        >
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 mb-6 border-b border-white/[0.08]">
             <div className="flex items-center gap-3">
               <span
                 className="h-3.5 w-3.5 rounded-full shrink-0"
-                style={{ backgroundColor: activeBoard.color }}
+                style={{
+                  backgroundColor: activeBoard.color,
+                  boxShadow: `0 0 7px ${activeBoard.color}60`,
+                }}
               />
               <div>
                 <div className="flex items-center gap-2">
@@ -513,8 +541,7 @@ export function TaskManagementView({
                   </button>
                 </div>
                 <p className="text-xs text-zinc-500">
-                  Projects, Tasks, and optional Micro-Subtasks inside{' '}
-                  {activeBoard.name}
+                  Projects, tasks &amp; micro-subtasks inside {activeBoard.name}
                 </p>
               </div>
             </div>
@@ -522,7 +549,7 @@ export function TaskManagementView({
             <button
               type="button"
               onClick={() => setAddingProject((prev) => !prev)}
-              className="inline-flex items-center gap-1.5 rounded-full border border-white/15 bg-[#19191F] hover:bg-[#22222A] px-4 py-2 text-xs font-semibold text-white transition self-start sm:self-auto"
+              className="inline-flex items-center gap-1.5 rounded-full border border-white/20 bg-white/[0.06] hover:bg-white/[0.12] px-4 py-2 text-xs font-semibold text-white transition self-start sm:self-auto"
             >
               <FolderPlus className="w-3.5 h-3.5" />
               <span>Add Project</span>
@@ -536,7 +563,7 @@ export function TaskManagementView({
               className="mb-6 rounded-2xl border border-white/15 bg-[#0A0A0C] p-4 flex flex-col sm:flex-row items-stretch sm:items-end gap-3"
             >
               <div className="flex-1">
-                <label className="block text-[11px] font-medium text-zinc-400 mb-1">
+                <label className="block text-xs font-medium text-zinc-400 mb-1">
                   Project Name
                 </label>
                 <input
@@ -545,11 +572,11 @@ export function TaskManagementView({
                   value={newProjectName}
                   onChange={(e) => setNewProjectName(e.target.value)}
                   placeholder="e.g. Metopen"
-                  className="w-full rounded-xl border border-white/10 bg-[#141418] px-3 py-2 text-sm text-white placeholder:text-zinc-600 focus:border-white/30 focus:outline-none"
+                  className="w-full rounded-xl border border-white/15 bg-white/[0.07] px-3 py-2 text-sm text-white placeholder:text-zinc-600 focus:border-white/40 focus:outline-none"
                 />
               </div>
               <div className="flex-1">
-                <label className="block text-[11px] font-medium text-zinc-400 mb-1">
+                <label className="block text-xs font-medium text-zinc-400 mb-1">
                   Short Note (optional)
                 </label>
                 <input
@@ -557,7 +584,7 @@ export function TaskManagementView({
                   value={newProjectDesc}
                   onChange={(e) => setNewProjectDesc(e.target.value)}
                   placeholder="e.g. Research methodology deliverables"
-                  className="w-full rounded-xl border border-white/10 bg-[#141418] px-3 py-2 text-sm text-white placeholder:text-zinc-600 focus:border-white/30 focus:outline-none"
+                  className="w-full rounded-xl border border-white/15 bg-white/[0.07] px-3 py-2 text-sm text-white placeholder:text-zinc-600 focus:border-white/40 focus:outline-none"
                 />
               </div>
               <div className="flex items-center gap-2">
@@ -571,7 +598,7 @@ export function TaskManagementView({
                 <button
                   type="button"
                   onClick={() => setAddingProject(false)}
-                  className="rounded-full border border-white/10 px-3.5 py-2 text-xs text-zinc-400 hover:text-white"
+                  className="rounded-full border border-white/15 px-3.5 py-2 text-xs text-zinc-400 hover:text-white"
                 >
                   Cancel
                 </button>
@@ -581,7 +608,7 @@ export function TaskManagementView({
 
           {/* Projects Grid */}
           {activeBoard.projects.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-white/10 py-12 text-center">
+            <div className="rounded-2xl border border-dashed border-white/15 py-12 text-center">
               <Layers className="w-7 h-7 text-zinc-600 mx-auto mb-2.5" />
               <p className="text-sm text-zinc-400">
                 No projects inside <strong>{activeBoard.name}</strong> yet.
@@ -589,7 +616,7 @@ export function TaskManagementView({
               <button
                 type="button"
                 onClick={() => setAddingProject(true)}
-                className="mt-4 rounded-full bg-white text-[#0A0A0C] px-4 py-2 text-xs font-semibold hover:bg-zinc-200 transition"
+                className="mt-4 rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 px-4 py-2 text-xs font-semibold transition"
               >
                 + Create First Project
               </button>
@@ -599,7 +626,8 @@ export function TaskManagementView({
               {activeBoard.projects.map((project) => (
                 <div
                   key={project.id}
-                  className="rounded-2xl border border-white/[0.08] bg-[#0B0B0E] p-5 flex flex-col justify-between"
+                  style={{ borderColor: `${activeBoard.color}28` }}
+                  className="rounded-2xl border bg-[#0B0B0F] p-5 flex flex-col justify-between"
                 >
                   <div>
                     {/* Project Header */}
@@ -607,8 +635,11 @@ export function TaskManagementView({
                       <div>
                         <div className="flex items-center gap-2">
                           <span
-                            className="h-2 w-2 rounded-full"
-                            style={{ backgroundColor: activeBoard.color }}
+                            className="h-2.5 w-2.5 rounded-full"
+                            style={{
+                              backgroundColor: activeBoard.color,
+                              boxShadow: `0 0 6px ${activeBoard.color}60`,
+                            }}
                           />
                           <h3 className="text-base font-bold text-white">
                             {project.name}
@@ -642,7 +673,7 @@ export function TaskManagementView({
                         return (
                           <div
                             key={task.id}
-                            className="rounded-xl border border-white/[0.07] bg-[#131318] p-3.5"
+                            className="rounded-xl border border-white/10 bg-[#121216] p-3.5"
                           >
                             <div className="flex items-center justify-between gap-2">
                               <div className="flex items-center gap-2.5 min-w-0">
@@ -707,7 +738,7 @@ export function TaskManagementView({
                                     type="button"
                                     onClick={() => openScheduleEditor(task)}
                                     title="Edit task schedule"
-                                    className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.05] hover:border-white/25 px-2 py-0.5 text-[10px] font-mono text-zinc-300 shrink-0 transition"
+                                    className="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/[0.05] hover:border-white/35 px-2.5 py-0.5 text-[10px] font-mono text-zinc-300 shrink-0 transition"
                                   >
                                     <Calendar className="w-2.5 h-2.5 text-zinc-400" />
                                     <span>
@@ -742,7 +773,7 @@ export function TaskManagementView({
                                   className={`rounded-lg p-1.5 transition ${
                                     schedulingTaskId === task.id ||
                                     task.scheduled_date
-                                      ? 'bg-white/10 text-white hover:bg-white/20'
+                                      ? 'bg-white/15 text-white hover:bg-white/25'
                                       : 'text-zinc-500 hover:bg-white/10 hover:text-white'
                                   }`}
                                 >
@@ -759,7 +790,7 @@ export function TaskManagementView({
                                     })
                                   }
                                   title="Work on this task"
-                                  className="inline-flex items-center gap-1 rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 px-2.5 py-1 text-[11px] font-semibold transition"
+                                  className="inline-flex items-center gap-1 rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 px-3 py-1 text-xs font-semibold transition"
                                 >
                                   <Play className="w-2.5 h-2.5 fill-[#0A0A0C]" />
                                   <span>Work</span>
@@ -782,7 +813,7 @@ export function TaskManagementView({
                                 className="mt-3 rounded-xl border border-white/15 bg-[#0A0A0C] p-3 flex flex-wrap items-end gap-2.5"
                               >
                                 <div className="flex-1 min-w-[130px]">
-                                  <label className="block text-[10px] uppercase tracking-wider text-zinc-500 mb-1">
+                                  <label className="block text-[11px] font-medium text-zinc-400 mb-1">
                                     Date
                                   </label>
                                   <input
@@ -792,12 +823,12 @@ export function TaskManagementView({
                                     onChange={(e) =>
                                       setScheduleDateDraft(e.target.value)
                                     }
-                                    className="w-full rounded-lg border border-white/10 bg-[#141418] px-2.5 py-1.5 text-xs text-white focus:border-white/30 focus:outline-none [color-scheme:dark]"
+                                    className="w-full rounded-lg border border-white/15 bg-white/[0.07] px-2.5 py-1.5 text-xs text-white focus:border-white/35 focus:outline-none [color-scheme:dark]"
                                   />
                                 </div>
 
                                 <div className="w-28">
-                                  <label className="block text-[10px] uppercase tracking-wider text-zinc-500 mb-1">
+                                  <label className="block text-[11px] font-medium text-zinc-400 mb-1">
                                     Time (opt)
                                   </label>
                                   <input
@@ -806,30 +837,35 @@ export function TaskManagementView({
                                     onChange={(e) =>
                                       setScheduleTimeDraft(e.target.value)
                                     }
-                                    className="w-full rounded-lg border border-white/10 bg-[#141418] px-2.5 py-1.5 text-xs text-white focus:border-white/30 focus:outline-none [color-scheme:dark]"
+                                    className="w-full rounded-lg border border-white/15 bg-white/[0.07] px-2.5 py-1.5 text-xs text-white focus:border-white/35 focus:outline-none [color-scheme:dark]"
                                   />
                                 </div>
 
                                 <div className="w-24">
-                                  <label className="block text-[10px] uppercase tracking-wider text-zinc-500 mb-1">
-                                    Duration
+                                  <label className="block text-[11px] font-medium text-zinc-400 mb-1">
+                                    Duration (opt)
                                   </label>
                                   <select
-                                    value={scheduleDurationDraft}
+                                    value={scheduleDurationDraft ?? ''}
                                     onChange={(e) =>
                                       setScheduleDurationDraft(
-                                        Number(e.target.value)
+                                        e.target.value
+                                          ? Number(e.target.value)
+                                          : null
                                       )
                                     }
-                                    className="w-full rounded-lg border border-white/10 bg-[#141418] px-2 py-1.5 text-xs text-white focus:border-white/30 focus:outline-none"
+                                    className="w-full rounded-lg border border-white/15 bg-[#121318] px-2 py-1.5 text-xs text-white focus:border-white/35 focus:outline-none"
                                   >
-                                    {![
-                                      15, 25, 30, 45, 50, 60, 90, 120, 180, 240,
-                                    ].includes(scheduleDurationDraft) && (
-                                      <option value={scheduleDurationDraft}>
-                                        {scheduleDurationDraft}m
-                                      </option>
-                                    )}
+                                    <option value="">-</option>
+                                    {scheduleDurationDraft !== null &&
+                                      ![
+                                        15, 25, 30, 45, 50, 60, 90, 120, 180,
+                                        240,
+                                      ].includes(scheduleDurationDraft) && (
+                                        <option value={scheduleDurationDraft}>
+                                          {scheduleDurationDraft}m
+                                        </option>
+                                      )}
                                     <option value={15}>15m</option>
                                     <option value={25}>25m</option>
                                     <option value={30}>30m</option>
@@ -851,7 +887,7 @@ export function TaskManagementView({
                                       onClick={() =>
                                         handleClearSchedule(task.id)
                                       }
-                                      className="rounded-lg border border-rose-500/25 bg-rose-500/10 hover:bg-rose-500/20 px-2.5 py-1.5 text-[11px] font-medium text-rose-300 transition"
+                                      className="rounded-lg border border-rose-500/35 bg-rose-500/10 hover:bg-rose-500/20 px-2.5 py-1.5 text-[11px] font-medium text-rose-300 transition"
                                     >
                                       Clear
                                     </button>
@@ -859,7 +895,7 @@ export function TaskManagementView({
                                   <button
                                     type="button"
                                     onClick={() => setSchedulingTaskId(null)}
-                                    className="rounded-lg border border-white/10 px-2.5 py-1.5 text-[11px] text-zinc-400 hover:text-white transition"
+                                    className="rounded-lg border border-white/15 px-2.5 py-1.5 text-[11px] text-zinc-400 hover:text-white transition"
                                   >
                                     Cancel
                                   </button>
@@ -942,7 +978,7 @@ export function TaskManagementView({
                                         }
                                         title="Work on this subtask"
                                         aria-label={`Work on ${sub.title}`}
-                                        className="opacity-70 group-hover/sub:opacity-100 inline-flex h-6 w-6 items-center justify-center rounded-full border border-white/15 bg-[#1B1B22] hover:bg-white hover:text-[#0A0A0C] text-zinc-200 transition"
+                                        className="opacity-70 group-hover/sub:opacity-100 inline-flex h-6 w-6 items-center justify-center rounded-full border border-white/15 bg-white/[0.06] hover:bg-white hover:text-[#0A0A0C] text-zinc-200 transition"
                                       >
                                         <Play className="w-2.5 h-2.5 fill-current" />
                                       </button>
@@ -952,7 +988,7 @@ export function TaskManagementView({
                                           handleDeleteSubtask(sub.id)
                                         }
                                         title="Delete subtask"
-                                        className="opacity-0 group-hover/sub:opacity-100 rounded p-0.5 text-zinc-500 hover:text-rose-300 transition"
+                                        className="opacity-0 group-hover/sub:opacity-100 rounded-lg p-0.5 text-zinc-500 hover:text-rose-300 transition"
                                       >
                                         <X className="w-3 h-3" />
                                       </button>
@@ -977,7 +1013,7 @@ export function TaskManagementView({
                                       }))
                                     }
                                     placeholder="+ Add optional subtask..."
-                                    className="flex-1 rounded-lg border border-white/[0.06] bg-[#0B0B0E] px-2.5 py-1.5 text-xs text-white placeholder:text-zinc-600 focus:border-white/25 focus:outline-none"
+                                    className="flex-1 rounded-lg border border-white/10 bg-white/[0.06] px-2.5 py-1.5 text-xs text-white placeholder:text-zinc-600 focus:border-white/30 focus:outline-none"
                                   />
                                   <button
                                     type="submit"
@@ -985,7 +1021,7 @@ export function TaskManagementView({
                                       busy ||
                                       !(subtaskDrafts[task.id] || '').trim()
                                     }
-                                    className="rounded-lg border border-white/10 bg-[#1B1B22] hover:bg-white hover:text-[#0A0A0C] disabled:opacity-30 px-2.5 py-1.5 text-[11px] font-medium text-zinc-200 transition"
+                                    className="rounded-lg border border-white/15 bg-white/[0.06] hover:bg-white hover:text-[#0A0A0C] disabled:opacity-30 px-2.5 py-1.5 text-[11px] font-medium text-zinc-200 transition"
                                   >
                                     Add
                                   </button>
@@ -1001,7 +1037,7 @@ export function TaskManagementView({
                   {/* Add Task to Project */}
                   <form
                     onSubmit={(e) => handleCreateTask(e, project.id)}
-                    className="mt-4 pt-3 border-t border-white/[0.06] flex items-center gap-2"
+                    className="mt-4 pt-3 border-t border-white/[0.08] flex items-center gap-2"
                   >
                     <input
                       type="text"
@@ -1013,12 +1049,12 @@ export function TaskManagementView({
                         }))
                       }
                       placeholder="+ New task in this project..."
-                      className="flex-1 rounded-xl border border-white/10 bg-[#141418] px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-white/30 focus:outline-none"
+                      className="flex-1 rounded-xl border border-white/15 bg-white/[0.07] px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-white/35 focus:outline-none"
                     />
                     <button
                       type="submit"
                       disabled={busy || !(taskDrafts[project.id] || '').trim()}
-                      className="rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 disabled:opacity-30 px-3.5 py-2 text-xs font-semibold transition"
+                      className="rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 disabled:opacity-30 px-4 py-2 text-xs font-semibold transition"
                     >
                       Add Task
                     </button>

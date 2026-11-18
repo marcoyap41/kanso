@@ -82,13 +82,15 @@ async function initDb() {
       time_spent_seconds INTEGER NOT NULL DEFAULT 0,
       scheduled_date VARCHAR(10),
       scheduled_time VARCHAR(5),
-      scheduled_duration_minutes INTEGER NOT NULL DEFAULT 60,
+      scheduled_duration_minutes INTEGER,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     ALTER TABLE tasks ADD COLUMN IF NOT EXISTS scheduled_date VARCHAR(10);
     ALTER TABLE tasks ADD COLUMN IF NOT EXISTS scheduled_time VARCHAR(5);
-    ALTER TABLE tasks ADD COLUMN IF NOT EXISTS scheduled_duration_minutes INTEGER NOT NULL DEFAULT 60;
+    ALTER TABLE tasks ADD COLUMN IF NOT EXISTS scheduled_duration_minutes INTEGER;
+    ALTER TABLE tasks ALTER COLUMN scheduled_duration_minutes DROP NOT NULL;
+    ALTER TABLE tasks ALTER COLUMN scheduled_duration_minutes DROP DEFAULT;
 
     CREATE TABLE IF NOT EXISTS subtasks (
       id SERIAL PRIMARY KEY,

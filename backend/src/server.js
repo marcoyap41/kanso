@@ -14,7 +14,15 @@ app.set('trust proxy', 1);
 
 const PORT = Number(process.env.PORT) || 4000;
 const MAX_BOARDS_PER_USER = 5;
-const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/+$/, '');
+function normalizeFrontendUrl(raw) {
+  let url = (raw || 'http://localhost:3000').trim().replace(/\/+$/, '');
+  if (!/^https?:\/\//i.test(url)) {
+    url = `https://${url}`;
+  }
+  return url;
+}
+
+const FRONTEND_URL = normalizeFrontendUrl(process.env.FRONTEND_URL);
 
 const LINK_TTL_MINUTES = 30;
 const LINK_TTL_MS = LINK_TTL_MINUTES * 60 * 1000;
@@ -638,12 +646,17 @@ async function updateTimedItem(table, req, res) {
     }
 
     if (scheduled_duration_minutes !== undefined) {
-      const mins = parseDurationMinutes(scheduled_duration_minutes, null);
-      if (mins === null) {
-        return res.status(400).json({ error: 'scheduled_duration_minutes must be an integer between 15 and 720' });
+      if (scheduled_duration_minutes === null || scheduled_duration_minutes === '') {
+        values.push(null);
+        updates.push(`scheduled_duration_minutes = $${values.length}`);
+      } else {
+        const mins = parseDurationMinutes(scheduled_duration_minutes, null);
+        if (mins === null) {
+          return res.status(400).json({ error: 'scheduled_duration_minutes must be an integer between 15 and 720 or null' });
+        }
+        values.push(mins);
+        updates.push(`scheduled_duration_minutes = $${values.length}`);
       }
-      values.push(mins);
-      updates.push(`scheduled_duration_minutes = $${values.length}`);
     }
   }
 
@@ -819,7 +832,7 @@ authRouter.post('/verify-email', async (req, res) => {
       `INSERT INTO users (email, name, username, password_hash)
        VALUES ($1, $2, $3, $4)
        RETURNING id, email, name, username, created_at`,
-      [pending.email, pending.name, username, pending.password_hash]
+      [pending.email, pending.name || null, username, pending.password_hash]
     );
 
     await client.query('COMMIT');
@@ -962,6 +975,37 @@ authRouter.get('/me', authMiddleware, async (req, res) => {
   }
 });
 
+authRouter.patch('/profile', authMiddleware, async (req, res) => {
+  const rawName = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+  if (!rawName) {
+    return res.status(400).json({ error: 'Name is required' });
+  }
+
+  const asianMatches = rawName.match(/[\u3000-\u9fff\uac00-\ud7af\uff00-\uffef]/g) || [];
+  if (rawName.length > 16 || asianMatches.length > 7) {
+    return res.status(400).json({
+      error: 'Name cannot exceed 7 Asian or 16 alphanumeric characters in length',
+    });
+  }
+
+  try {
+    const result = await pool.query(
+      `UPDATE users
+       SET name = $1, username = $1
+       WHERE id = $2
+       RETURNING id, email, name, username, created_at`,
+      [rawName, req.user.id]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    return res.json({ user: formatUser(result.rows[0]) });
+  } catch (err) {
+    console.error('Update profile error:', err);
+    return res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
+
 authRouter.post('/refresh', async (req, res) => {
   const raw = req.cookies?.[REFRESH_COOKIE];
   if (!raw || typeof raw !== 'string') {
@@ -1067,12 +1111,12 @@ async function finishOAuth(provider, req, res) {
       if (existingUser.rowCount > 0) {
         user = existingUser.rows[0];
       } else {
-        const username = profile.name || profile.email.split('@')[0];
+        const username = profile.email.split('@')[0];
         const inserted = await pool.query(
           `INSERT INTO users (email, name, username, password_hash)
-           VALUES ($1, $2, $3, NULL)
+           VALUES ($1, NULL, $2, NULL)
            RETURNING id, email, name, username, created_at`,
-          [profile.email, profile.name, username]
+          [profile.email, username]
         );
         user = inserted.rows[0];
       }
@@ -1345,9 +1389,12 @@ app.post('/api/tasks', authMiddleware, async (req, res) => {
     scheduledTime = rawTime.trim();
   }
 
-  const scheduledDuration = parseDurationMinutes(rawDuration, 60);
-  if (scheduledDuration === null) {
-    return res.status(400).json({ error: 'scheduled_duration_minutes must be an integer between 15 and 720' });
+  let scheduledDuration = null;
+  if (rawDuration !== undefined && rawDuration !== null && rawDuration !== '') {
+    scheduledDuration = parseDurationMinutes(rawDuration, null);
+    if (scheduledDuration === null) {
+      return res.status(400).json({ error: 'scheduled_duration_minutes must be an integer between 15 and 720 or null' });
+    }
   }
 
   try {

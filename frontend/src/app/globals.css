@@ -10,11 +10,27 @@
 
 html,
 body {
-  background-color: #0a0a0c;
+  background-color: #070709;
   color: #ffffff;
   font-family: var(--font-sans), system-ui, -apple-system, sans-serif;
   overflow-x: hidden;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Crisp blinking bold vertical typing mark for HUD prompts & inputs */
+@keyframes kansoCaretBlink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.animate-kanso-caret {
+  animation: kansoCaretBlink 1s steps(2, start) infinite;
 }
 
 /* Subtle floating motion for ambient peripheral cards */
@@ -63,4 +79,43 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.28);
+}
+
+/* Traveling shimmer pulse along the HUD horizon arcs */
+@keyframes kansoArcSweep {
+  0% {
+    stroke-dashoffset: 1100;
+    opacity: 0;
+  }
+  15% {
+    opacity: 0.9;
+  }
+  65% {
+    opacity: 0.9;
+  }
+  85%,
+  100% {
+    stroke-dashoffset: -240;
+    opacity: 0;
+  }
+}
+
+.animate-kanso-arc-sweep {
+  stroke-dasharray: 140 1100;
+  animation: kansoArcSweep 8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.animate-kanso-arc-sweep-delayed {
+  stroke-dasharray: 140 1100;
+  animation: kansoArcSweep 8s cubic-bezier(0.4, 0, 0.2, 1) 4s infinite;
+}
+
+/* Hide native cursor on desktop fine-pointer screens while custom HUD cursor is mounted */
+@media (hover: hover) and (pointer: fine) {
+  html.kanso-custom-cursor,
+  html.kanso-custom-cursor *,
+  html.kanso-custom-cursor *::before,
+  html.kanso-custom-cursor *::after {
+    cursor: none !important;
+  }
 }

@@ -23,7 +23,7 @@ export interface Task {
   time_spent_seconds: number;
   scheduled_date?: string | null;
   scheduled_time?: string | null;
-  scheduled_duration_minutes?: number;
+  scheduled_duration_minutes?: number | null;
   created_at?: string;
   subtasks: Subtask[];
 }

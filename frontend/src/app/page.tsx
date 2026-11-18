@@ -9,6 +9,7 @@ import {
 } from '@/lib/api';
 import { AuthScreen } from '@/components/AuthScreen';
 import { KansoApp } from '@/components/KansoApp';
+import { NameOnboardingScreen } from '@/components/NameOnboardingScreen';
 import type { User } from '@/types/kanso';
 
 export default function Page() {
@@ -144,10 +145,10 @@ export default function Page() {
 
   if (checkingSession) {
     return (
-      <div className="min-h-screen bg-[#0A0A0C] text-white flex items-center justify-center">
-        <div className="flex items-center gap-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
-          <span className="h-2 w-2 rounded-full bg-white animate-pulse" />
-          <span>kanso</span>
+      <div className="min-h-screen bg-[#070709] text-white flex items-center justify-center">
+        <div className="flex items-center gap-3 text-xs font-mono uppercase tracking-[0.24em] text-zinc-500">
+          <span className="h-2 w-2 rounded-[1px] bg-white animate-pulse" />
+          <span>kanso // initializing</span>
         </div>
       </div>
     );
@@ -166,9 +167,19 @@ export default function Page() {
     );
   }
 
+  if (!user.name) {
+    return (
+      <NameOnboardingScreen
+        initialName=""
+        onCompleted={(updated) => setUser(updated)}
+      />
+    );
+  }
+
   return (
     <KansoApp
       user={user}
+      onUserUpdated={(updated) => setUser(updated)}
       onLogout={() => {
         void api.logout();
         setUser(null);

@@ -10,7 +10,9 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  GripVertical,
   Layers,
+  Move,
   Play,
   Plus,
   Timer,
@@ -315,6 +317,19 @@ export function CalendarView({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Drag-and-drop rescheduling mode state
+  const [isDragMode, setIsDragMode] = useState(false);
+  const [draggingTaskId, setDraggingTaskId] = useState<number | null>(null);
+  const [dropHoverTarget, setDropHoverTarget] = useState<string | null>(null);
+
+  // Floating HUD task detail popover state (prevents truncation/clipping on cramped slots)
+  const [hoveredCalendarItem, setHoveredCalendarItem] = useState<{
+    task: Task;
+    project: Project;
+    board: TaskBoard;
+    rect: { top: number; left: number; bottom: number; width: number };
+  } | null>(null);
+
   // Schedule modal state
   const [scheduleModalOpen, setScheduleModalOpen] = useState(false);
   const [scheduleMode, setScheduleMode] = useState<'existing' | 'new'>(
@@ -325,7 +340,7 @@ export function CalendarView({
   const [modalNewTaskTitle, setModalNewTaskTitle] = useState('');
   const [modalDate, setModalDate] = useState(todayKey);
   const [modalTime, setModalTime] = useState('');
-  const [modalDuration, setModalDuration] = useState(60);
+  const [modalDuration, setModalDuration] = useState<number | null>(null);
 
   // Manual Focus Session modal state
   const [logModalOpen, setLogModalOpen] = useState(false);
@@ -560,6 +575,7 @@ export function CalendarView({
     task?: Task;
   }) {
     setError(null);
+    setHoveredCalendarItem(null);
     const targetDate = opts?.dateKey || selectedDateKey || todayKey;
     setModalDate(targetDate);
 
@@ -567,7 +583,7 @@ export function CalendarView({
       setScheduleMode('existing');
       setModalTaskId(String(opts.task.id));
       setModalTime(opts.time ?? opts.task.scheduled_time ?? '');
-      setModalDuration(opts.task.scheduled_duration_minutes || 60);
+      setModalDuration(opts.task.scheduled_duration_minutes ?? null);
     } else {
       const preferred = unscheduledTasks[0] || flatTasks[0] || null;
       if (preferred) {
@@ -579,7 +595,9 @@ export function CalendarView({
         setModalTaskId('');
       }
       setModalTime(opts?.time ?? '');
-      setModalDuration(60);
+      setModalDuration(
+        preferred ? (preferred.task.scheduled_duration_minutes ?? null) : null
+      );
     }
 
     if (allProjects[0] && !modalProjectId) {
@@ -671,6 +689,7 @@ export function CalendarView({
       await api.updateTask(taskId, {
         scheduled_date: null,
         scheduled_time: null,
+        scheduled_duration_minutes: null,
       });
       setScheduleModalOpen(false);
     });
@@ -705,6 +724,106 @@ export function CalendarView({
     });
   }
 
+  function showTaskHoverCard(
+    e: React.MouseEvent<HTMLElement>,
+    item: FlatTask
+  ) {
+    if (draggingTaskId !== null) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    setHoveredCalendarItem({
+      task: item.task,
+      project: item.project,
+      board: item.board,
+      rect: {
+        top: r.top,
+        left: r.left,
+        bottom: r.bottom,
+        width: r.width,
+      },
+    });
+  }
+
+  function hideTaskHoverCard() {
+    setHoveredCalendarItem(null);
+  }
+
+  function handleTaskDragStart(e: React.DragEvent, task: Task) {
+    if (!isDragMode) return;
+    e.stopPropagation();
+    setHoveredCalendarItem(null);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', String(task.id));
+    window.requestAnimationFrame(() => {
+      setDraggingTaskId(task.id);
+    });
+  }
+
+  function handleTaskDragEnd() {
+    setDraggingTaskId(null);
+    setDropHoverTarget(null);
+  }
+
+  function getDraggedTask(e: React.DragEvent): Task | null {
+    const rawId = e.dataTransfer.getData('text/plain');
+    const targetId = rawId ? Number(rawId) : draggingTaskId;
+    if (!targetId) return null;
+    return flatTasks.find((f) => f.task.id === targetId)?.task || null;
+  }
+
+  async function handleDropOnDate(
+    e: React.DragEvent,
+    dateKey: string,
+    mode: 'keep-time' | 'all-day' | 'timed',
+    timeStr?: string
+  ) {
+    e.preventDefault();
+    e.stopPropagation();
+    const task = getDraggedTask(e);
+    setDraggingTaskId(null);
+    setDropHoverTarget(null);
+    if (!task) return;
+
+    const nextDate = dateKey;
+    const nextTime =
+      mode === 'all-day'
+        ? null
+        : mode === 'timed'
+          ? timeStr || null
+          : task.scheduled_time || null;
+
+    if (
+      task.scheduled_date === nextDate &&
+      (task.scheduled_time || null) === nextTime
+    ) {
+      return;
+    }
+
+    await runAction(async () => {
+      await api.updateTask(task.id, {
+        scheduled_date: nextDate,
+        scheduled_time: nextTime,
+      });
+      setSelectedDateKey(nextDate);
+    });
+  }
+
+  async function handleDropToUnschedule(e: React.DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    const task = getDraggedTask(e);
+    setDraggingTaskId(null);
+    setDropHoverTarget(null);
+    if (!task || !task.scheduled_date) return;
+
+    await runAction(async () => {
+      await api.updateTask(task.id, {
+        scheduled_date: null,
+        scheduled_time: null,
+        scheduled_duration_minutes: null,
+      });
+    });
+  }
+
   const timelineDays =
     viewMode === 'day' ? [anchorDateKey] : getWeekDateKeys(anchorDateKey);
   const maxBoardDaySeconds = Math.max(
@@ -713,40 +832,60 @@ export function CalendarView({
   );
 
   return (
-    <div className="relative z-10 w-full max-w-[1400px] mx-auto px-4 sm:px-8 pt-5 pb-20">
-      {/* Top Header & Navigation */}
-      <div className="flex flex-col xl:flex-row xl:items-end justify-between gap-5 mb-6">
+    <div className="relative z-10 w-full max-w-[1400px] mx-auto px-4 sm:px-8 pt-14 sm:pt-16 pb-28">
+      {/* Top Header & Single-Line Navigation Bar */}
+      <div className="mb-6 space-y-4">
         <div>
           <div className="flex items-center gap-2.5 mb-2">
             <button
               type="button"
               onClick={onBackHome}
               title="Back to Home"
-              className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-[#141418] hover:border-white/25 hover:text-white px-2.5 py-1 text-[11px] font-medium text-zinc-400 transition"
+              className="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/[0.04] hover:border-white/35 hover:text-white px-2.5 py-1 text-[11px] font-medium text-zinc-400 transition"
             >
               <ArrowLeft className="w-3 h-3" />
               <span>Home</span>
             </button>
-            <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-zinc-500">
-              Schedule &amp; Focus History
+            <span className="text-[10px] font-mono uppercase tracking-[0.22em] text-zinc-500">
+              TIMELINE // SCHEDULE &amp; FOCUS HISTORY
             </span>
           </div>
 
-          <h1 className="text-2xl sm:text-4xl font-bold tracking-[-0.03em] text-white">
-            {formatPeriodHeading(viewMode, anchorDateKey)}
+          <h1 className="text-2xl sm:text-4xl font-bold tracking-[-0.03em] text-white inline-flex items-center gap-2">
+            <span>{formatPeriodHeading(viewMode, anchorDateKey)}</span>
+            <span
+              aria-hidden="true"
+              className="inline-block w-[3px] h-6 sm:h-8 bg-white rounded-[1px] shadow-[0_0_10px_rgba(255,255,255,0.9)] animate-kanso-caret"
+            />
           </h1>
 
-          {/* Live Summary Pills + Layer Toggles */}
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-[#131318] px-3 py-1 text-xs font-mono text-zinc-300">
-              <Clock className="w-3.5 h-3.5 text-emerald-400" />
+          {/* Six subtle dots divider */}
+          <div
+            aria-hidden="true"
+            className="mt-2.5 flex items-center gap-1.5"
+          >
+            {Array.from({ length: 6 }).map((_, i) => (
+              <span
+                key={i}
+                className="h-1 w-1 rounded-full bg-zinc-500/80"
+              />
+            ))}
+          </div>
+        </div>
+
+        {/* Single-Line Summary Pills + Toolbar Controls */}
+        <div className="flex items-center justify-between gap-2.5 flex-nowrap whitespace-nowrap overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+          {/* Left: Live Summary Pills + Layer Toggles */}
+          <div className="flex items-center gap-1.5 flex-nowrap shrink-0">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-white/15 bg-white/[0.04] px-2.5 py-1 text-xs font-mono text-zinc-300 shrink-0">
+              <Clock className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
               <span>
                 Today: {formatLoggedDuration(periodStats.todayFocusSeconds)}
               </span>
             </span>
 
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-[#131318] px-3 py-1 text-xs font-mono text-zinc-300">
-              <Timer className="w-3.5 h-3.5 text-zinc-400" />
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-white/15 bg-white/[0.04] px-2.5 py-1 text-xs font-mono text-zinc-300 shrink-0">
+              <Timer className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
               <span>
                 {viewMode === 'day'
                   ? 'Day'
@@ -757,8 +896,8 @@ export function CalendarView({
               </span>
             </span>
 
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-[#131318] px-3 py-1 text-xs font-mono text-zinc-300">
-              <CheckCircle2 className="w-3.5 h-3.5 text-zinc-400" />
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-white/15 bg-white/[0.04] px-2.5 py-1 text-xs font-mono text-zinc-300 shrink-0">
+              <CheckCircle2 className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
               <span>
                 {periodStats.scheduledCompleted}/{periodStats.scheduledTotal}{' '}
                 scheduled
@@ -768,110 +907,128 @@ export function CalendarView({
             <button
               type="button"
               onClick={() => setShowPlanned((p) => !p)}
-              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition ${
+              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition shrink-0 ${
                 showPlanned
-                  ? 'border-white/25 bg-white/10 text-white'
-                  : 'border-white/10 bg-[#111115] text-zinc-500'
+                  ? 'border-white/30 bg-white/10 text-white'
+                  : 'border-white/10 bg-white/[0.02] text-zinc-500'
               }`}
             >
-              <span className="h-2 w-2 rounded-sm border border-current" />
+              <span className="h-2 w-2 rounded-full border border-current shrink-0" />
               <span>Planned</span>
             </button>
 
             <button
               type="button"
               onClick={() => setShowSessions((s) => !s)}
-              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition ${
+              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition shrink-0 ${
                 showSessions
-                  ? 'border-emerald-400/40 bg-emerald-500/15 text-emerald-200'
-                  : 'border-white/10 bg-[#111115] text-zinc-500'
+                  ? 'border-emerald-400/45 bg-emerald-500/15 text-emerald-200'
+                  : 'border-white/10 bg-white/[0.02] text-zinc-500'
               }`}
             >
-              <span className="h-2 w-2 rounded-full bg-emerald-400" />
+              <span className="h-2 w-2 rounded-full bg-emerald-400 shrink-0" />
               <span>Focus Logs</span>
             </button>
           </div>
-        </div>
 
-        {/* Right Toolbar: Period Navigation, View Switcher, Primary Actions */}
-        <div className="flex flex-wrap items-center gap-2.5">
-          {/* Date Stepper */}
-          <div className="inline-flex items-center rounded-full border border-white/10 bg-[#121216] p-1">
-            <button
-              type="button"
-              onClick={() => stepPeriod(-1)}
-              aria-label="Previous period"
-              className="rounded-full p-1.5 text-zinc-400 hover:bg-white/10 hover:text-white transition"
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </button>
-            <button
-              type="button"
-              onClick={jumpToToday}
-              className="rounded-full px-3 py-1 text-xs font-medium text-zinc-200 hover:bg-white/10 transition"
-            >
-              Today
-            </button>
-            <button
-              type="button"
-              onClick={() => stepPeriod(1)}
-              aria-label="Next period"
-              className="rounded-full p-1.5 text-zinc-400 hover:bg-white/10 hover:text-white transition"
-            >
-              <ChevronRight className="w-4 h-4" />
-            </button>
-          </div>
-
-          {/* Day / Week / Month Switcher */}
-          <div className="inline-flex items-center rounded-full border border-white/10 bg-[#121216] p-1">
-            {(['day', 'week', 'month'] as CalendarMode[]).map((mode) => (
+          {/* Right: Period Navigation, View Switcher, Primary Actions */}
+          <div className="flex items-center gap-2 flex-nowrap shrink-0">
+            {/* Date Stepper */}
+            <div className="inline-flex items-center rounded-full border border-white/15 bg-[#121216] p-1 shrink-0">
               <button
-                key={mode}
                 type="button"
-                onClick={() => {
-                  setViewMode(mode);
-                  setAnchorDateKey(selectedDateKey);
-                }}
-                className={`rounded-full px-3.5 py-1 text-xs font-semibold capitalize transition ${
-                  viewMode === mode
-                    ? 'bg-white text-[#0A0A0C]'
-                    : 'text-zinc-400 hover:text-white'
-                }`}
+                onClick={() => stepPeriod(-1)}
+                aria-label="Previous period"
+                className="rounded-full p-1.5 text-zinc-400 hover:bg-white/10 hover:text-white transition"
               >
-                {mode}
+                <ChevronLeft className="w-4 h-4" />
               </button>
-            ))}
+              <button
+                type="button"
+                onClick={jumpToToday}
+                className="rounded-full px-3 py-1 text-xs font-medium text-zinc-200 hover:bg-white/10 transition"
+              >
+                Today
+              </button>
+              <button
+                type="button"
+                onClick={() => stepPeriod(1)}
+                aria-label="Next period"
+                className="rounded-full p-1.5 text-zinc-400 hover:bg-white/10 hover:text-white transition"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Day / Week / Month Switcher */}
+            <div className="inline-flex items-center rounded-full border border-white/15 bg-[#121216] p-1 shrink-0">
+              {(['day', 'week', 'month'] as CalendarMode[]).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => {
+                    setViewMode(mode);
+                    setAnchorDateKey(selectedDateKey);
+                  }}
+                  className={`rounded-full px-3 py-1 text-xs capitalize transition ${
+                    viewMode === mode
+                      ? 'bg-white text-[#0A0A0C] font-semibold'
+                      : 'text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  {mode}
+                </button>
+              ))}
+            </div>
+
+            {/* Primary Actions */}
+            <button
+              type="button"
+              onClick={() => {
+                setIsDragMode((prev) => !prev);
+                setDraggingTaskId(null);
+                setDropHoverTarget(null);
+              }}
+              title="Toggle drag-and-drop rescheduling mode"
+              className={`inline-flex items-center gap-1.5 rounded-full border px-3.5 py-2 text-xs font-semibold transition shrink-0 ${
+                isDragMode
+                  ? 'border-sky-400/60 bg-sky-500/15 text-sky-200 shadow-[0_0_20px_rgba(56,189,248,0.2)]'
+                  : 'border-white/15 bg-[#121216] text-zinc-300 hover:border-white/35 hover:text-white'
+              }`}
+            >
+              <Move className="w-3.5 h-3.5 shrink-0" />
+              <span>Drag Mode</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => openScheduleModal({ dateKey: selectedDateKey })}
+              className="inline-flex items-center gap-1.5 rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 px-3.5 py-2 text-xs font-semibold shadow-[0_0_24px_rgba(255,255,255,0.14)] transition shrink-0"
+            >
+              <CalendarPlus className="w-3.5 h-3.5 shrink-0" />
+              <span>Schedule Task</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => openLogSessionModal({ dateKey: selectedDateKey })}
+              disabled={flatTasks.length === 0}
+              title={
+                flatTasks.length === 0
+                  ? 'Create a task first to log focus sessions'
+                  : 'Manually log a completed focus session'
+              }
+              className="inline-flex items-center gap-1.5 rounded-full border border-white/20 bg-white/[0.05] hover:bg-white/[0.12] disabled:opacity-40 disabled:cursor-not-allowed px-3.5 py-2 text-xs font-semibold text-white transition shrink-0"
+            >
+              <Plus className="w-3.5 h-3.5 shrink-0" />
+              <span>Log Session</span>
+            </button>
           </div>
-
-          {/* Primary Actions */}
-          <button
-            type="button"
-            onClick={() => openScheduleModal({ dateKey: selectedDateKey })}
-            className="inline-flex items-center gap-1.5 rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 px-4 py-2 text-xs font-semibold shadow-[0_0_24px_rgba(255,255,255,0.14)] transition"
-          >
-            <CalendarPlus className="w-3.5 h-3.5" />
-            <span>Schedule Task</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => openLogSessionModal({ dateKey: selectedDateKey })}
-            disabled={flatTasks.length === 0}
-            title={
-              flatTasks.length === 0
-                ? 'Create a task first to log focus sessions'
-                : 'Manually log a completed focus session'
-            }
-            className="inline-flex items-center gap-1.5 rounded-full border border-white/15 bg-[#15151B] hover:border-white/30 hover:bg-[#1C1C24] disabled:opacity-40 disabled:cursor-not-allowed px-4 py-2 text-xs font-semibold text-white transition"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>Log Session</span>
-          </button>
         </div>
       </div>
 
       {error && (
-        <div className="mb-5 flex items-center justify-between rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-2.5 text-xs text-rose-200">
+        <div className="mb-5 flex items-center justify-between rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-xs text-rose-200">
           <span>{error}</span>
           <button
             type="button"
@@ -886,7 +1043,7 @@ export function CalendarView({
       {/* Main Split Grid: Calendar Surface + Selected Day Sidebar */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Left/Center Surface: Week / Day Timeline OR Month Grid */}
-        <section className="lg:col-span-8 rounded-3xl border border-white/10 bg-[#111115]/90 backdrop-blur-xl overflow-hidden shadow-[0_24px_80px_rgba(0,0,0,0.55)]">
+        <section className="lg:col-span-8 rounded-3xl border border-white/15 bg-[#121216]/90 backdrop-blur-xl overflow-hidden shadow-[0_24px_80px_rgba(0,0,0,0.65)]">
           {viewMode === 'month' ? (
             <div className="p-4 sm:p-5">
               {/* Weekday Header */}
@@ -894,7 +1051,7 @@ export function CalendarView({
                 {WEEKDAY_LABELS.map((label) => (
                   <div
                     key={label}
-                    className="text-center text-[11px] font-mono uppercase tracking-wider text-zinc-500 py-1"
+                    className="text-center text-xs font-medium text-zinc-500 py-1"
                   >
                     {label}
                   </div>
@@ -918,11 +1075,47 @@ export function CalendarView({
                     0
                   );
 
+                  const monthTargetId = `month-${dateKey}`;
+                  const isMonthDropHover =
+                    isDragMode && dropHoverTarget === monthTargetId;
+
                   return (
                     <div
                       key={dateKey}
                       onClick={() => handleSelectDay(dateKey, false)}
                       onDoubleClick={() => handleSelectDay(dateKey, true)}
+                      onDragOver={
+                        isDragMode
+                          ? (e) => {
+                              e.preventDefault();
+                              e.dataTransfer.dropEffect = 'move';
+                              if (dropHoverTarget !== monthTargetId) {
+                                setDropHoverTarget(monthTargetId);
+                              }
+                            }
+                          : undefined
+                      }
+                      onDragLeave={
+                        isDragMode
+                          ? (e) => {
+                              if (
+                                e.currentTarget.contains(
+                                  e.relatedTarget as Node
+                                )
+                              ) {
+                                return;
+                              }
+                              setDropHoverTarget((prev) =>
+                                prev === monthTargetId ? null : prev
+                              );
+                            }
+                          : undefined
+                      }
+                      onDrop={
+                        isDragMode
+                          ? (e) => void handleDropOnDate(e, dateKey, 'keep-time')
+                          : undefined
+                      }
                       role="button"
                       tabIndex={0}
                       onKeyDown={(e) => {
@@ -931,11 +1124,13 @@ export function CalendarView({
                         }
                       }}
                       className={`group min-h-[102px] sm:min-h-[118px] rounded-2xl border p-2 text-left flex flex-col justify-between transition cursor-pointer ${
-                        isSelected
-                          ? 'border-white/40 bg-[#181820]'
-                          : inMonth
-                            ? 'border-white/[0.08] bg-[#0B0B0E] hover:border-white/25'
-                            : 'border-white/[0.04] bg-[#09090B] opacity-50 hover:opacity-80'
+                        isMonthDropHover
+                          ? '!border-sky-400/80 !bg-sky-500/10 ring-1 ring-sky-400/40'
+                          : isSelected
+                            ? 'border-white/40 bg-[#15151C]'
+                            : inMonth
+                              ? 'border-white/10 bg-[#0C0C10] hover:border-white/30'
+                              : 'border-white/[0.05] bg-[#09090C] opacity-50 hover:opacity-80'
                       }`}
                     >
                       <div className="flex items-center justify-between gap-1">
@@ -944,7 +1139,7 @@ export function CalendarView({
                             isToday
                               ? 'bg-white text-[#0A0A0C] font-bold'
                               : isSelected
-                                ? 'bg-white/15 text-white font-semibold'
+                                ? 'bg-white/20 text-white font-semibold'
                                 : 'text-zinc-300'
                           }`}
                         >
@@ -953,7 +1148,7 @@ export function CalendarView({
 
                         <div className="flex items-center gap-1">
                           {dayFocusSecs > 0 && (
-                            <span className="rounded-full bg-emerald-500/15 border border-emerald-400/30 px-1.5 py-0.5 text-[9px] font-mono text-emerald-300">
+                            <span className="rounded-full bg-emerald-500/15 border border-emerald-400/35 px-1.5 py-0.5 text-[9px] font-mono text-emerald-300">
                               {formatLoggedDuration(dayFocusSecs)}
                             </span>
                           )}
@@ -964,7 +1159,7 @@ export function CalendarView({
                               openScheduleModal({ dateKey });
                             }}
                             title="Schedule task on this date"
-                            className="opacity-0 group-hover:opacity-100 rounded-md p-0.5 text-zinc-400 hover:bg-white/10 hover:text-white transition"
+                            className="opacity-0 group-hover:opacity-100 rounded-full p-0.5 text-zinc-400 hover:bg-white/10 hover:text-white transition"
                           >
                             <Plus className="w-3 h-3" />
                           </button>
@@ -972,32 +1167,51 @@ export function CalendarView({
                       </div>
 
                       <div className="mt-1.5 space-y-1 overflow-hidden">
-                        {dayTasks.slice(0, 3).map(({ task, board }) => (
-                          <div
-                            key={task.id}
-                            className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] truncate bg-white/[0.04] border border-white/[0.06]"
-                          >
-                            <span
-                              className="h-1.5 w-1.5 rounded-full shrink-0"
-                              style={{ backgroundColor: board.color }}
-                            />
-                            <span
-                              className={`truncate ${
-                                task.completed
-                                  ? 'line-through text-zinc-500'
-                                  : 'text-zinc-200'
-                              }`}
+                        {dayTasks
+                          .slice(0, isDragMode ? 6 : 3)
+                          .map(({ task, project, board }) => (
+                            <div
+                              key={task.id}
+                              draggable={isDragMode}
+                              onDragStart={(e) => handleTaskDragStart(e, task)}
+                              onDragEnd={handleTaskDragEnd}
+                              onMouseEnter={(e) =>
+                                showTaskHoverCard(e, { task, project, board })
+                              }
+                              onMouseLeave={hideTaskHoverCard}
+                              className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] truncate bg-white/[0.05] border border-white/[0.08] ${
+                                isDragMode
+                                  ? 'cursor-grab active:cursor-grabbing hover:border-sky-400/50'
+                                  : ''
+                              } ${draggingTaskId === task.id ? 'opacity-45' : ''}`}
                             >
-                              {task.scheduled_time
-                                ? `${task.scheduled_time} `
-                                : ''}
-                              {task.title}
-                            </span>
-                          </div>
-                        ))}
-                        {dayTasks.length > 3 && (
+                              {isDragMode && (
+                                <GripVertical className="w-2.5 h-2.5 text-zinc-500 shrink-0" />
+                              )}
+                              <span
+                                className="h-1.5 w-1.5 rounded-full shrink-0"
+                                style={{
+                                  backgroundColor: board.color,
+                                  boxShadow: `0 0 6px ${board.color}60`,
+                                }}
+                              />
+                              <span
+                                className={`truncate ${
+                                  task.completed
+                                    ? 'line-through text-zinc-500'
+                                    : 'text-zinc-200'
+                                }`}
+                              >
+                                {task.scheduled_time
+                                  ? `${task.scheduled_time} `
+                                  : ''}
+                                {task.title}
+                              </span>
+                            </div>
+                          ))}
+                        {dayTasks.length > (isDragMode ? 6 : 3) && (
                           <p className="text-[9px] font-mono text-zinc-500 px-1">
-                            +{dayTasks.length - 3} more
+                            +{dayTasks.length - (isDragMode ? 6 : 3)} more
                           </p>
                         )}
                       </div>
@@ -1025,8 +1239,8 @@ export function CalendarView({
                       gridTemplateColumns: `56px repeat(${timelineDays.length}, minmax(0, 1fr))`,
                     }}
                   >
-                    <div className="p-2 text-[10px] font-mono text-zinc-600 flex items-end justify-center pb-2.5 border-r border-white/[0.06]">
-                      ALL
+                    <div className="p-2 text-[10px] font-medium text-zinc-500 flex items-end justify-center pb-2.5 border-r border-white/[0.06]">
+                      All
                     </div>
                     {timelineDays.map((dayKey) => {
                       const d = parseLocalDateKey(dayKey);
@@ -1040,17 +1254,58 @@ export function CalendarView({
                         sessionsByDate.get(dayKey) || []
                       ).reduce((s, x) => s + (x.duration_seconds || 0), 0);
 
+                      const allDayTargetId = `allday-${dayKey}`;
+                      const isAllDayDropHover =
+                        isDragMode && dropHoverTarget === allDayTargetId;
+
                       return (
                         <div
                           key={dayKey}
                           onClick={() => handleSelectDay(dayKey, false)}
+                          onDragOver={
+                            isDragMode
+                              ? (e) => {
+                                  e.preventDefault();
+                                  e.dataTransfer.dropEffect = 'move';
+                                  if (dropHoverTarget !== allDayTargetId) {
+                                    setDropHoverTarget(allDayTargetId);
+                                  }
+                                }
+                              : undefined
+                          }
+                          onDragLeave={
+                            isDragMode
+                              ? (e) => {
+                                  if (
+                                    e.currentTarget.contains(
+                                      e.relatedTarget as Node
+                                    )
+                                  ) {
+                                    return;
+                                  }
+                                  setDropHoverTarget((prev) =>
+                                    prev === allDayTargetId ? null : prev
+                                  );
+                                }
+                              : undefined
+                          }
+                          onDrop={
+                            isDragMode
+                              ? (e) =>
+                                  void handleDropOnDate(e, dayKey, 'all-day')
+                              : undefined
+                          }
                           className={`border-r last:border-r-0 border-white/[0.06] p-2.5 cursor-pointer transition ${
-                            isSelected ? 'bg-white/[0.04]' : 'hover:bg-white/[0.02]'
+                            isAllDayDropHover
+                              ? '!bg-sky-500/15 ring-1 ring-inset ring-sky-400/50'
+                              : isSelected
+                                ? 'bg-white/[0.05]'
+                                : 'hover:bg-white/[0.02]'
                           }`}
                         >
                           <div className="flex items-center justify-between gap-1 mb-1.5">
                             <div className="flex items-center gap-1.5">
-                              <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
+                              <span className="text-[11px] font-medium text-zinc-400">
                                 {d.toLocaleDateString('en-US', {
                                   weekday: 'short',
                                 })}
@@ -1069,7 +1324,7 @@ export function CalendarView({
                             </div>
 
                             {dayFocusSecs > 0 && (
-                              <span className="rounded-full border border-emerald-400/25 bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-mono text-emerald-300">
+                              <span className="rounded-full border border-emerald-400/35 bg-emerald-500/15 px-2 py-0.5 text-[9px] font-mono text-emerald-300">
                                 {formatLoggedDuration(dayFocusSecs)}
                               </span>
                             )}
@@ -1081,6 +1336,19 @@ export function CalendarView({
                               {allDayTasks.map(({ task, project, board }) => (
                                 <div
                                   key={task.id}
+                                  draggable={isDragMode}
+                                  onDragStart={(e) =>
+                                    handleTaskDragStart(e, task)
+                                  }
+                                  onDragEnd={handleTaskDragEnd}
+                                  onMouseEnter={(e) =>
+                                    showTaskHoverCard(e, {
+                                      task,
+                                      project,
+                                      board,
+                                    })
+                                  }
+                                  onMouseLeave={hideTaskHoverCard}
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     openScheduleModal({
@@ -1088,8 +1356,15 @@ export function CalendarView({
                                       task,
                                     });
                                   }}
-                                  className="group/allday flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#0B0B0F] hover:border-white/30 px-2 py-1 text-[11px] transition"
+                                  className={`group/allday flex items-center gap-1.5 rounded-lg border border-white/15 bg-[#0A0A0C] hover:border-white/35 hover:bg-[#13131A] px-2 py-1 text-[11px] transition ${
+                                    isDragMode
+                                      ? 'cursor-grab active:cursor-grabbing hover:border-sky-400/50'
+                                      : ''
+                                  } ${draggingTaskId === task.id ? 'opacity-45' : ''}`}
                                 >
+                                  {isDragMode && (
+                                    <GripVertical className="w-3 h-3 text-zinc-500 shrink-0" />
+                                  )}
                                   <button
                                     type="button"
                                     onClick={(e) => {
@@ -1109,10 +1384,13 @@ export function CalendarView({
                                   </button>
                                   <span
                                     className="h-1.5 w-1.5 rounded-full shrink-0"
-                                    style={{ backgroundColor: board.color }}
+                                    style={{
+                                      backgroundColor: board.color,
+                                      boxShadow: `0 0 6px ${board.color}60`,
+                                    }}
                                   />
                                   <span
-                                    className={`flex-1 truncate ${
+                                    className={`flex-1 min-w-0 truncate ${
                                       task.completed
                                         ? 'line-through text-zinc-500'
                                         : 'text-zinc-200'
@@ -1132,7 +1410,7 @@ export function CalendarView({
                                       });
                                     }}
                                     title="Focus on this task"
-                                    className="opacity-60 group-hover/allday:opacity-100 rounded p-0.5 text-zinc-300 hover:text-white"
+                                    className="opacity-60 group-hover/allday:opacity-100 rounded-full p-0.5 text-zinc-300 hover:text-white shrink-0"
                                   >
                                     <Play className="w-2.5 h-2.5 fill-current" />
                                   </button>
@@ -1148,7 +1426,8 @@ export function CalendarView({
                   {/* Scrollable 24-Hour Grid (starts scrolled to 06:00) */}
                   <div
                     ref={timelineScrollRef}
-                    className="h-[580px] overflow-y-auto relative bg-[#0B0B0E]"
+                    onScroll={hideTaskHoverCard}
+                    className="h-[580px] overflow-y-auto relative bg-[#0A0A0C]"
                   >
                     <div
                       className="grid relative"
@@ -1158,7 +1437,7 @@ export function CalendarView({
                       }}
                     >
                       {/* Time Gutter */}
-                      <div className="relative border-r border-white/[0.06] bg-[#0E0E12] select-none">
+                      <div className="relative border-r border-white/[0.06] bg-[#0F0F13] select-none">
                         {HOURS.map((hour) => (
                           <div
                             key={hour}
@@ -1193,25 +1472,111 @@ export function CalendarView({
                           <div
                             key={dayKey}
                             className={`relative border-r last:border-r-0 border-white/[0.06] ${
-                              isSelected ? 'bg-white/[0.015]' : ''
+                              isSelected ? 'bg-white/[0.02]' : ''
                             }`}
                           >
-                            {/* Hour Slots (click empty slot to schedule) */}
-                            {HOURS.map((hour) => (
-                              <div
-                                key={hour}
-                                style={{ height: `${HOUR_HEIGHT}px` }}
-                                onClick={() => {
-                                  setSelectedDateKey(dayKey);
-                                  openScheduleModal({
-                                    dateKey: dayKey,
-                                    time: `${String(hour).padStart(2, '0')}:00`,
-                                  });
-                                }}
-                                title={`Click to schedule at ${formatHourGutter(hour)}`}
-                                className="border-b border-white/[0.04] hover:bg-white/[0.03] transition-colors cursor-crosshair"
-                              />
-                            ))}
+                            {/* Hour Slots (click empty slot to schedule, or drop task in Drag Mode) */}
+                            {HOURS.map((hour) => {
+                              const hh = String(hour).padStart(2, '0');
+                              const slot00 = `slot-${dayKey}-${hh}:00`;
+                              const slot30 = `slot-${dayKey}-${hh}:30`;
+                              const isHover00 =
+                                isDragMode && dropHoverTarget === slot00;
+                              const isHover30 =
+                                isDragMode && dropHoverTarget === slot30;
+                              const hoveredSlotTime = isHover00
+                                ? `${hh}:00`
+                                : isHover30
+                                  ? `${hh}:30`
+                                  : null;
+
+                              const getSnappedTime = (e: React.DragEvent) => {
+                                const rect =
+                                  e.currentTarget.getBoundingClientRect();
+                                const mins =
+                                  e.clientY - rect.top >= rect.height / 2
+                                    ? '30'
+                                    : '00';
+                                return `${hh}:${mins}`;
+                              };
+
+                              return (
+                                <div
+                                  key={hour}
+                                  style={{ height: `${HOUR_HEIGHT}px` }}
+                                  onClick={() => {
+                                    setSelectedDateKey(dayKey);
+                                    openScheduleModal({
+                                      dateKey: dayKey,
+                                      time: `${hh}:00`,
+                                    });
+                                  }}
+                                  onDragOver={
+                                    isDragMode
+                                      ? (e) => {
+                                          e.preventDefault();
+                                          e.dataTransfer.dropEffect = 'move';
+                                          const snapped = getSnappedTime(e);
+                                          const targetId = `slot-${dayKey}-${snapped}`;
+                                          if (dropHoverTarget !== targetId) {
+                                            setDropHoverTarget(targetId);
+                                          }
+                                        }
+                                      : undefined
+                                  }
+                                  onDragLeave={
+                                    isDragMode
+                                      ? (e) => {
+                                          if (
+                                            e.currentTarget.contains(
+                                              e.relatedTarget as Node
+                                            )
+                                          ) {
+                                            return;
+                                          }
+                                          setDropHoverTarget((prev) =>
+                                            prev === slot00 || prev === slot30
+                                              ? null
+                                              : prev
+                                          );
+                                        }
+                                      : undefined
+                                  }
+                                  onDrop={
+                                    isDragMode
+                                      ? (e) => {
+                                          const snapped = getSnappedTime(e);
+                                          void handleDropOnDate(
+                                            e,
+                                            dayKey,
+                                            'timed',
+                                            snapped
+                                          );
+                                        }
+                                      : undefined
+                                  }
+                                  title={`Click to schedule at ${formatHourGutter(hour)}`}
+                                  className={`relative border-b border-white/[0.04] transition-colors cursor-crosshair ${
+                                    hoveredSlotTime
+                                      ? '!bg-sky-500/15 !border-sky-400/50'
+                                      : 'hover:bg-white/[0.035]'
+                                  }`}
+                                >
+                                  {hoveredSlotTime && (
+                                    <div
+                                      className={`pointer-events-none absolute inset-x-1 z-30 flex items-center gap-1.5 ${
+                                        isHover30 ? 'top-1/2' : 'top-1'
+                                      }`}
+                                    >
+                                      <span className="h-[1.5px] flex-1 bg-sky-400/80 shadow-[0_0_8px_rgba(56,189,248,0.8)]" />
+                                      <span className="rounded bg-sky-500 px-1.5 py-0.5 text-[9px] font-mono font-semibold text-[#0A0A0C]">
+                                        {hoveredSlotTime}
+                                      </span>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
 
                             {/* Live Current Time Line */}
                             {isToday && (
@@ -1221,7 +1586,7 @@ export function CalendarView({
                                 }}
                                 className="pointer-events-none absolute inset-x-0 z-30 flex items-center"
                               >
-                                <span className="-ml-1.5 h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_10px_#34D399]" />
+                                <span className="-ml-1 h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_10px_#34D399]" />
                                 <div className="h-[1.5px] flex-1 bg-emerald-400/90 shadow-[0_0_8px_rgba(52,211,153,0.6)]" />
                               </div>
                             )}
@@ -1241,6 +1606,19 @@ export function CalendarView({
                                 return (
                                   <div
                                     key={entry.id}
+                                    draggable={isDragMode}
+                                    onDragStart={(e) =>
+                                      handleTaskDragStart(e, task)
+                                    }
+                                    onDragEnd={handleTaskDragEnd}
+                                    onMouseEnter={(e) =>
+                                      showTaskHoverCard(e, {
+                                        task,
+                                        project,
+                                        board,
+                                      })
+                                    }
+                                    onMouseLeave={hideTaskHoverCard}
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       setSelectedDateKey(dayKey);
@@ -1256,10 +1634,22 @@ export function CalendarView({
                                       width: `calc(${widthPct}% - 6px)`,
                                       borderLeftColor: board.color,
                                     }}
-                                    className={`group/blk absolute z-20 rounded-xl border border-white/15 border-l-[3px] px-2 py-1 overflow-hidden cursor-pointer backdrop-blur-md transition ${
-                                      task.completed
-                                        ? 'bg-[#121216]/75 opacity-65'
-                                        : 'bg-[#16161E]/95 hover:border-white/35 shadow-[0_6px_20px_rgba(0,0,0,0.45)]'
+                                    className={`group/blk absolute z-20 rounded-xl border border-white/15 border-l-4 overflow-hidden backdrop-blur-md transition ${
+                                      entry.laneCount > 1
+                                        ? 'px-1.5 py-1'
+                                        : 'px-2 py-1'
+                                    } ${
+                                      draggingTaskId !== null
+                                        ? 'pointer-events-none'
+                                        : isDragMode
+                                          ? 'cursor-grab active:cursor-grabbing hover:border-sky-400/60 hover:bg-[#191922]'
+                                          : 'cursor-pointer hover:bg-[#191922]'
+                                    } ${
+                                      draggingTaskId === task.id
+                                        ? '!opacity-45'
+                                        : task.completed
+                                          ? 'bg-[#121216]/75 opacity-65'
+                                          : 'bg-[#16161D]/95 hover:border-white/40 shadow-[0_6px_20px_rgba(0,0,0,0.45)]'
                                     }`}
                                   >
                                     <div className="flex items-start justify-between gap-1">
@@ -1312,11 +1702,11 @@ export function CalendarView({
 
                                     {heightPx >= 42 && (
                                       <p className="mt-0.5 pl-5 text-[10px] font-mono text-zinc-400 truncate">
-                                        {task.scheduled_time} ·{' '}
-                                        {task.scheduled_duration_minutes || 60}m
-                                        {project.name
-                                          ? ` · ${project.name}`
+                                        {task.scheduled_time}
+                                        {task.scheduled_duration_minutes
+                                          ? ` · ${task.scheduled_duration_minutes}m`
                                           : ''}
+                                        {project.name ? ` · ${project.name}` : ''}
                                       </p>
                                     )}
                                   </div>
@@ -1343,16 +1733,23 @@ export function CalendarView({
                                       left: `calc(${leftPct}% + 3px)`,
                                       width: `calc(${widthPct}% - 6px)`,
                                       backgroundColor: `${accent}1E`,
-                                      borderColor: `${accent}66`,
+                                      borderColor: `${accent}70`,
                                     }}
                                     title={`${label} (${formatLoggedDuration(sess.duration_seconds)})`}
-                                    className="absolute z-10 rounded-xl border px-2 py-1 overflow-hidden cursor-pointer backdrop-blur-md transition hover:brightness-110"
+                                    className={`absolute z-10 rounded-xl border px-2 py-1 overflow-hidden cursor-pointer backdrop-blur-md transition hover:brightness-110 ${
+                                      draggingTaskId !== null
+                                        ? 'pointer-events-none'
+                                        : ''
+                                    }`}
                                   >
                                     <div className="flex items-center justify-between gap-1">
                                       <div className="flex items-center gap-1 min-w-0">
                                         <span
                                           className="h-1.5 w-1.5 rounded-full shrink-0"
-                                          style={{ backgroundColor: accent }}
+                                          style={{
+                                            backgroundColor: accent,
+                                            boxShadow: `0 0 6px ${accent}60`,
+                                          }}
                                         />
                                         <span className="text-[11px] font-medium text-white truncate">
                                           {label}
@@ -1366,9 +1763,11 @@ export function CalendarView({
                                     </div>
 
                                     {heightPx >= 42 && (
-                                      <p className="mt-0.5 text-[9px] font-mono uppercase tracking-wider text-zinc-300/80 truncate">
-                                        {sess.mode} ·{' '}
-                                        {formatClockTime(sess.started_at)}–
+                                      <p className="mt-0.5 text-[10px] font-mono text-zinc-300/80 truncate">
+                                        <span className="capitalize">
+                                          {sess.mode}
+                                        </span>{' '}
+                                        · {formatClockTime(sess.started_at)}–
                                         {formatClockTime(sess.ended_at)}
                                       </p>
                                     )}
@@ -1392,10 +1791,10 @@ export function CalendarView({
         {/* Right Sidebar: Selected Day Inspector + Unscheduled Backlog */}
         <aside className="lg:col-span-4 space-y-5">
           {/* Panel 1: Selected Day Inspector */}
-          <div className="rounded-3xl border border-white/10 bg-[#111115]/90 backdrop-blur-xl p-5 shadow-[0_20px_60px_rgba(0,0,0,0.45)]">
+          <div className="rounded-3xl border border-white/15 bg-[#121216]/90 backdrop-blur-xl p-5 shadow-[0_20px_60px_rgba(0,0,0,0.55)]">
             <div className="flex items-start justify-between gap-3 pb-4 border-b border-white/[0.08]">
               <div>
-                <p className="text-[10px] font-mono uppercase tracking-[0.18em] text-zinc-500">
+                <p className="text-xs font-medium text-zinc-500">
                   Selected Day
                 </p>
                 <h2 className="text-lg font-bold text-white mt-0.5">
@@ -1415,7 +1814,7 @@ export function CalendarView({
                 <button
                   type="button"
                   onClick={() => handleSelectDay(selectedDateKey, true)}
-                  className="rounded-full border border-white/15 bg-[#18181E] hover:bg-white hover:text-[#0A0A0C] px-3 py-1 text-[11px] font-medium text-zinc-300 transition shrink-0"
+                  className="rounded-full border border-white/15 bg-white/[0.04] hover:border-white/35 hover:text-white px-3 py-1 text-xs font-medium text-zinc-300 transition shrink-0"
                 >
                   Open Day
                 </button>
@@ -1423,18 +1822,20 @@ export function CalendarView({
             </div>
 
             {/* Focus Summary & Board Breakdown */}
-            <div className="mt-4 rounded-2xl border border-white/[0.08] bg-[#0B0B0E] p-4">
+            <div className="mt-4 rounded-2xl border border-white/10 bg-[#0B0B0F] p-4">
               <div className="flex items-center justify-between gap-2">
                 <div>
-                  <p className="text-[11px] text-zinc-500">Total Focus Time</p>
+                  <p className="text-xs font-medium text-zinc-400">
+                    Total Focus Time
+                  </p>
                   <p className="text-2xl font-mono font-bold text-white mt-0.5">
                     {formatLoggedDuration(selectedDayFocusSeconds)}
                   </p>
                 </div>
                 <div className="text-right">
-                  <span className="rounded-full border border-white/10 bg-[#15151B] px-2.5 py-1 text-[10px] font-mono text-zinc-400">
-                    {selectedDaySessions.length} session
-                    {selectedDaySessions.length === 1 ? '' : 's'}
+                  <span className="rounded-full border border-white/15 bg-white/[0.04] px-2.5 py-1 text-[11px] font-mono text-zinc-400">
+                    {selectedDaySessions.length}{' '}
+                    {selectedDaySessions.length === 1 ? 'session' : 'sessions'}
                   </span>
                 </div>
               </div>
@@ -1452,7 +1853,10 @@ export function CalendarView({
                           <span className="flex items-center gap-1.5 text-zinc-300 truncate">
                             <span
                               className="h-2 w-2 rounded-full shrink-0"
-                              style={{ backgroundColor: b.color }}
+                              style={{
+                                backgroundColor: b.color,
+                                boxShadow: `0 0 6px ${b.color}60`,
+                              }}
                             />
                             <span className="truncate">{b.name}</span>
                           </span>
@@ -1479,7 +1883,7 @@ export function CalendarView({
             {/* Scheduled Tasks on Selected Date */}
             <div className="mt-5">
               <div className="flex items-center justify-between mb-2.5">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                <h3 className="text-xs font-semibold text-zinc-300">
                   Scheduled Tasks ({selectedDayTasks.length})
                 </h3>
                 <button
@@ -1487,14 +1891,14 @@ export function CalendarView({
                   onClick={() =>
                     openScheduleModal({ dateKey: selectedDateKey })
                   }
-                  className="text-[11px] font-medium text-zinc-400 hover:text-white transition"
+                  className="text-xs font-medium text-zinc-400 hover:text-white transition"
                 >
                   + Add
                 </button>
               </div>
 
               {selectedDayTasks.length === 0 ? (
-                <p className="rounded-xl border border-dashed border-white/10 py-4 px-3 text-center text-xs text-zinc-500">
+                <p className="rounded-xl border border-dashed border-white/15 py-4 px-3 text-center text-xs text-zinc-500">
                   No tasks scheduled for {formatShortDateLabel(selectedDateKey)}.
                 </p>
               ) : (
@@ -1502,9 +1906,19 @@ export function CalendarView({
                   {selectedDayTasks.map(({ task, project, board }) => (
                     <div
                       key={task.id}
-                      className="group flex items-center justify-between gap-2 rounded-xl border border-white/[0.07] bg-[#0B0B0E] hover:border-white/20 px-3 py-2 transition"
+                      draggable={isDragMode}
+                      onDragStart={(e) => handleTaskDragStart(e, task)}
+                      onDragEnd={handleTaskDragEnd}
+                      className={`group flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-[#0B0B0F] hover:border-white/25 px-3 py-2 transition ${
+                        isDragMode
+                          ? 'cursor-grab active:cursor-grabbing hover:border-sky-400/50'
+                          : ''
+                      } ${draggingTaskId === task.id ? 'opacity-45' : ''}`}
                     >
                       <div className="flex items-center gap-2 min-w-0">
+                        {isDragMode && (
+                          <GripVertical className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                        )}
                         <button
                           type="button"
                           onClick={() => void handleToggleTaskDone(task)}
@@ -1544,8 +1958,16 @@ export function CalendarView({
                             />
                             {project.name}
                             {task.scheduled_time
-                              ? ` · ${task.scheduled_time} (${task.scheduled_duration_minutes || 60}m)`
-                              : ' · All day'}
+                              ? ` · ${task.scheduled_time}${
+                                  task.scheduled_duration_minutes
+                                    ? ` (${task.scheduled_duration_minutes}m)`
+                                    : ''
+                                }`
+                              : ` · All day${
+                                  task.scheduled_duration_minutes
+                                    ? ` (${task.scheduled_duration_minutes}m)`
+                                    : ''
+                                }`}
                           </p>
                         </button>
                       </div>
@@ -1574,8 +1996,8 @@ export function CalendarView({
             {/* Focus Session History Log on Selected Date */}
             <div className="mt-5">
               <div className="flex items-center justify-between mb-2.5">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
-                  Focus History ({selectedDaySessions.length})
+                <h3 className="text-xs font-semibold text-zinc-300">
+                  Focus Sessions History ({selectedDaySessions.length})
                 </h3>
                 <button
                   type="button"
@@ -1583,14 +2005,14 @@ export function CalendarView({
                   onClick={() =>
                     openLogSessionModal({ dateKey: selectedDateKey })
                   }
-                  className="text-[11px] font-medium text-zinc-400 hover:text-white disabled:opacity-40 transition"
+                  className="text-xs font-medium text-zinc-400 hover:text-white disabled:opacity-40 transition"
                 >
                   + Log
                 </button>
               </div>
 
               {selectedDaySessions.length === 0 ? (
-                <p className="rounded-xl border border-dashed border-white/10 py-4 px-3 text-center text-xs text-zinc-500">
+                <p className="rounded-xl border border-dashed border-white/15 py-4 px-3 text-center text-xs text-zinc-500">
                   No focus blocks recorded on{' '}
                   {formatShortDateLabel(selectedDateKey)}.
                 </p>
@@ -1599,7 +2021,7 @@ export function CalendarView({
                   {selectedDaySessions.map((sess) => (
                     <div
                       key={sess.id}
-                      className="group flex items-start justify-between gap-2 rounded-xl border border-white/[0.07] bg-[#0B0B0E] px-3 py-2"
+                      className="group flex items-start justify-between gap-2 rounded-xl border border-white/10 bg-[#0B0B0F] px-3 py-2"
                     >
                       <div className="min-w-0">
                         <div className="flex items-center gap-1.5">
@@ -1624,7 +2046,7 @@ export function CalendarView({
                           <span className="text-emerald-300">
                             {formatLoggedDuration(sess.duration_seconds)}
                           </span>
-                          <span className="rounded-full border border-white/10 px-1.5 py-0.2 uppercase text-[9px] text-zinc-400">
+                          <span className="rounded-full border border-white/15 px-2 py-0.5 capitalize text-[9px] text-zinc-400">
                             {sess.mode}
                           </span>
                         </div>
@@ -1647,17 +2069,50 @@ export function CalendarView({
           </div>
 
           {/* Panel 2: Unscheduled Tasks Backlog */}
-          <div className="rounded-3xl border border-white/10 bg-[#111115]/90 backdrop-blur-xl p-5 shadow-[0_20px_60px_rgba(0,0,0,0.45)]">
+          <div
+            onDragOver={
+              isDragMode
+                ? (e) => {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    if (dropHoverTarget !== 'unschedule') {
+                      setDropHoverTarget('unschedule');
+                    }
+                  }
+                : undefined
+            }
+            onDragLeave={
+              isDragMode
+                ? (e) => {
+                    if (e.currentTarget.contains(e.relatedTarget as Node)) {
+                      return;
+                    }
+                    setDropHoverTarget((prev) =>
+                      prev === 'unschedule' ? null : prev
+                    );
+                  }
+                : undefined
+            }
+            onDrop={
+              isDragMode ? (e) => void handleDropToUnschedule(e) : undefined
+            }
+            className={`rounded-3xl border bg-[#121216]/90 backdrop-blur-xl p-5 shadow-[0_20px_60px_rgba(0,0,0,0.55)] transition ${
+              isDragMode && dropHoverTarget === 'unschedule'
+                ? 'border-sky-400/75 bg-sky-500/[0.08] ring-1 ring-sky-400/35'
+                : 'border-white/15'
+            }`}
+          >
             <div className="flex items-center justify-between gap-2 mb-3">
               <div>
                 <h3 className="text-sm font-bold text-white">
-                  Unscheduled Backlog
+                  Unscheduled Tasks
                 </h3>
                 <p className="text-[11px] text-zinc-500">
-                  Assign open tasks directly onto {formatShortDateLabel(selectedDateKey)}
+                  Assign open tasks directly onto{' '}
+                  {formatShortDateLabel(selectedDateKey)}
                 </p>
               </div>
-              <span className="rounded-full border border-white/10 bg-[#18181E] px-2.5 py-0.5 text-[10px] font-mono text-zinc-400">
+              <span className="rounded-full border border-white/15 bg-white/[0.04] px-2.5 py-0.5 text-[11px] font-mono text-zinc-400">
                 {unscheduledTasks.length}
               </span>
             </div>
@@ -1671,13 +2126,13 @@ export function CalendarView({
                 <button
                   type="button"
                   onClick={onGoToTaskManagement}
-                  className="rounded-full bg-white text-[#0A0A0C] px-4 py-1.5 text-xs font-semibold hover:bg-zinc-200 transition"
+                  className="rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 px-4 py-1.5 text-xs font-semibold transition"
                 >
                   Open Task Management
                 </button>
               </div>
             ) : unscheduledTasks.length === 0 ? (
-              <p className="rounded-xl border border-dashed border-white/10 py-5 px-3 text-center text-xs text-zinc-500">
+              <p className="rounded-xl border border-dashed border-white/15 py-5 px-3 text-center text-xs text-zinc-500">
                 All active tasks are scheduled!
               </p>
             ) : (
@@ -1685,21 +2140,33 @@ export function CalendarView({
                 {unscheduledTasks.slice(0, 20).map(({ task, project, board }) => (
                   <div
                     key={task.id}
-                    className="flex items-center justify-between gap-2 rounded-xl border border-white/[0.07] bg-[#0B0B0E] hover:border-white/20 px-3 py-2 transition"
+                    draggable={isDragMode}
+                    onDragStart={(e) => handleTaskDragStart(e, task)}
+                    onDragEnd={handleTaskDragEnd}
+                    className={`flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-[#0B0B0F] hover:border-white/25 px-3 py-2 transition ${
+                      isDragMode
+                        ? 'cursor-grab active:cursor-grabbing hover:border-sky-400/50'
+                        : ''
+                    } ${draggingTaskId === task.id ? 'opacity-45' : ''}`}
                   >
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span
-                          className="h-2 w-2 rounded-full shrink-0"
-                          style={{ backgroundColor: board.color }}
-                        />
-                        <p className="text-xs font-medium text-zinc-200 truncate">
-                          {task.title}
+                    <div className="flex items-center gap-2 min-w-0">
+                      {isDragMode && (
+                        <GripVertical className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                      )}
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className="h-2 w-2 rounded-full shrink-0"
+                            style={{ backgroundColor: board.color }}
+                          />
+                          <p className="text-xs font-medium text-zinc-200 truncate">
+                            {task.title}
+                          </p>
+                        </div>
+                        <p className="text-[10px] text-zinc-500 truncate pl-3.5">
+                          {board.name} / {project.name}
                         </p>
                       </div>
-                      <p className="text-[10px] text-zinc-500 truncate pl-3.5">
-                        {board.name} / {project.name}
-                      </p>
                     </div>
 
                     <button
@@ -1710,7 +2177,7 @@ export function CalendarView({
                           task,
                         })
                       }
-                      className="rounded-full border border-white/15 bg-[#16161C] hover:bg-white hover:text-[#0A0A0C] px-2.5 py-1 text-[11px] font-medium text-zinc-300 transition shrink-0"
+                      className="rounded-full border border-white/15 bg-white/[0.05] hover:bg-white hover:text-[#0A0A0C] px-3 py-1 text-xs font-medium text-zinc-200 transition shrink-0"
                     >
                       Schedule
                     </button>
@@ -1726,16 +2193,31 @@ export function CalendarView({
       {scheduleModalOpen && (
         <div
           onClick={() => setScheduleModalOpen(false)}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-md rounded-3xl border border-white/15 bg-[#121217] p-6 shadow-[0_24px_90px_rgba(0,0,0,0.85)]"
+            className="w-full max-w-md rounded-3xl border border-white/15 bg-[#121216] p-6 shadow-[0_24px_90px_rgba(0,0,0,0.9)]"
           >
-            <div className="flex items-center justify-between mb-5">
-              <div className="flex items-center gap-2">
-                <CalendarIcon className="w-4 h-4 text-zinc-300" />
-                <h2 className="text-lg font-bold text-white">Schedule Task</h2>
+            <div className="flex items-start justify-between mb-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <CalendarIcon className="w-4 h-4 text-zinc-300" />
+                  <h2 className="text-lg font-bold tracking-wide text-white">
+                    Schedule Task
+                  </h2>
+                </div>
+                <div
+                  aria-hidden="true"
+                  className="mt-2 flex items-center gap-1.5"
+                >
+                  {Array.from({ length: 6 }).map((_, i) => (
+                    <span
+                      key={i}
+                      className="h-1 w-1 rounded-full bg-zinc-500/80"
+                    />
+                  ))}
+                </div>
               </div>
               <button
                 type="button"
@@ -1769,14 +2251,14 @@ export function CalendarView({
             ) : (
               <form onSubmit={handleSaveScheduleModal} className="space-y-4">
                 {/* Mode Toggle: Existing Task vs Create New Task */}
-                <div className="grid grid-cols-2 gap-1 rounded-full border border-white/10 bg-[#0A0A0C] p-1">
+                <div className="grid grid-cols-2 gap-1 rounded-full border border-white/15 bg-[#0A0A0C] p-1">
                   <button
                     type="button"
                     disabled={flatTasks.length === 0}
                     onClick={() => setScheduleMode('existing')}
-                    className={`rounded-full py-1.5 text-xs font-semibold transition disabled:opacity-40 ${
+                    className={`rounded-full py-1.5 text-xs font-medium transition disabled:opacity-40 ${
                       scheduleMode === 'existing'
-                        ? 'bg-white text-[#0A0A0C]'
+                        ? 'bg-white text-[#0A0A0C] font-semibold'
                         : 'text-zinc-400 hover:text-white'
                     }`}
                   >
@@ -1785,9 +2267,9 @@ export function CalendarView({
                   <button
                     type="button"
                     onClick={() => setScheduleMode('new')}
-                    className={`rounded-full py-1.5 text-xs font-semibold transition ${
+                    className={`rounded-full py-1.5 text-xs font-medium transition ${
                       scheduleMode === 'new'
-                        ? 'bg-white text-[#0A0A0C]'
+                        ? 'bg-white text-[#0A0A0C] font-semibold'
                         : 'text-zinc-400 hover:text-white'
                     }`}
                   >
@@ -1808,13 +2290,11 @@ export function CalendarView({
                         const match = flatTasks.find(
                           (f) => String(f.task.id) === e.target.value
                         );
-                        if (match?.task.scheduled_duration_minutes) {
-                          setModalDuration(
-                            match.task.scheduled_duration_minutes
-                          );
-                        }
+                        setModalDuration(
+                          match?.task.scheduled_duration_minutes ?? null
+                        );
                       }}
-                      className="w-full rounded-xl border border-white/10 bg-[#0A0A0C] px-3 py-2.5 text-sm text-white focus:border-white/30 focus:outline-none"
+                      className="w-full rounded-xl border border-white/15 bg-[#0A0A0C] px-3 py-2.5 text-sm text-white focus:border-white/40 focus:outline-none"
                     >
                       <option value="">Select a task...</option>
                       {boards.map((board) =>
@@ -1849,7 +2329,7 @@ export function CalendarView({
                         required
                         value={modalProjectId}
                         onChange={(e) => setModalProjectId(e.target.value)}
-                        className="w-full rounded-xl border border-white/10 bg-[#0A0A0C] px-3 py-2.5 text-sm text-white focus:border-white/30 focus:outline-none"
+                        className="w-full rounded-xl border border-white/15 bg-[#0A0A0C] px-3 py-2.5 text-sm text-white focus:border-white/40 focus:outline-none"
                       >
                         {allProjects.map(({ project, board }) => (
                           <option key={project.id} value={project.id}>
@@ -1868,7 +2348,7 @@ export function CalendarView({
                         value={modalNewTaskTitle}
                         onChange={(e) => setModalNewTaskTitle(e.target.value)}
                         placeholder="e.g. Draft architecture doc"
-                        className="w-full rounded-xl border border-white/10 bg-[#0A0A0C] px-3.5 py-2.5 text-sm text-white placeholder:text-zinc-600 focus:border-white/30 focus:outline-none"
+                        className="w-full rounded-xl border border-white/15 bg-white/[0.07] px-3.5 py-2.5 text-sm text-white placeholder:text-zinc-600 focus:border-white/40 focus:outline-none"
                       />
                     </div>
                   </div>
@@ -1884,7 +2364,7 @@ export function CalendarView({
                       required
                       value={modalDate}
                       onChange={(e) => setModalDate(e.target.value)}
-                      className="w-full rounded-xl border border-white/10 bg-[#0A0A0C] px-3 py-2 text-sm text-white focus:border-white/30 focus:outline-none [color-scheme:dark]"
+                      className="w-full rounded-xl border border-white/15 bg-white/[0.07] px-3 py-2 text-sm text-white focus:border-white/40 focus:outline-none [color-scheme:dark]"
                     />
                   </div>
 
@@ -1897,7 +2377,7 @@ export function CalendarView({
                         <button
                           type="button"
                           onClick={() => setModalTime('')}
-                          className="text-[10px] text-zinc-500 hover:text-white"
+                          className="text-[11px] font-medium text-zinc-500 hover:text-white"
                         >
                           All day
                         </button>
@@ -1907,23 +2387,40 @@ export function CalendarView({
                       type="time"
                       value={modalTime}
                       onChange={(e) => setModalTime(e.target.value)}
-                      className="w-full rounded-xl border border-white/10 bg-[#0A0A0C] px-3 py-2 text-sm text-white focus:border-white/30 focus:outline-none [color-scheme:dark]"
+                      className="w-full rounded-xl border border-white/15 bg-white/[0.07] px-3 py-2 text-sm text-white focus:border-white/40 focus:outline-none [color-scheme:dark]"
                     />
                   </div>
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-zinc-400 mb-1.5">
-                    Duration
-                  </label>
-                  <select
-                    value={modalDuration}
-                    onChange={(e) => setModalDuration(Number(e.target.value))}
-                    className="w-full rounded-xl border border-white/10 bg-[#0A0A0C] px-3 py-2 text-sm text-white focus:border-white/30 focus:outline-none"
-                  >
-                    {!DURATION_PRESETS.includes(modalDuration) && (
-                      <option value={modalDuration}>{modalDuration}m</option>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-xs font-medium text-zinc-400">
+                      Duration
+                    </label>
+                    {modalDuration !== null && (
+                      <button
+                        type="button"
+                        onClick={() => setModalDuration(null)}
+                        className="text-[11px] font-medium text-zinc-500 hover:text-white"
+                      >
+                        Clear
+                      </button>
                     )}
+                  </div>
+                  <select
+                    value={modalDuration ?? ''}
+                    onChange={(e) =>
+                      setModalDuration(
+                        e.target.value ? Number(e.target.value) : null
+                      )
+                    }
+                    className="w-full rounded-xl border border-white/15 bg-[#0A0A0C] px-3 py-2 text-sm text-white focus:border-white/40 focus:outline-none"
+                  >
+                    <option value="">-</option>
+                    {modalDuration !== null &&
+                      !DURATION_PRESETS.includes(modalDuration) && (
+                        <option value={modalDuration}>{modalDuration}m</option>
+                      )}
                     <option value={15}>15 minutes</option>
                     <option value={25}>25 minutes</option>
                     <option value={30}>30 minutes</option>
@@ -1946,7 +2443,7 @@ export function CalendarView({
                         onClick={() =>
                           void handleUnscheduleTask(editingTaskObj.task.id)
                         }
-                        className="rounded-full border border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 px-3.5 py-2 text-xs font-medium text-rose-300 transition"
+                        className="rounded-full border border-rose-500/35 bg-rose-500/10 hover:bg-rose-500/20 px-3.5 py-2 text-xs font-medium text-rose-300 transition"
                       >
                         Unschedule
                       </button>
@@ -1963,7 +2460,7 @@ export function CalendarView({
                             subtaskId: null,
                           });
                         }}
-                        className="inline-flex items-center gap-1 rounded-full border border-white/15 bg-[#18181F] hover:border-white/35 px-3 py-2 text-xs font-medium text-white transition"
+                        className="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/[0.05] hover:border-white/35 px-3.5 py-2 text-xs font-medium text-white transition"
                       >
                         <Play className="w-3 h-3 fill-current" />
                         <span>Focus</span>
@@ -1975,7 +2472,7 @@ export function CalendarView({
                     <button
                       type="button"
                       onClick={() => setScheduleModalOpen(false)}
-                      className="rounded-full border border-white/10 px-4 py-2 text-xs text-zinc-400 hover:text-white transition"
+                      className="rounded-full border border-white/15 px-4 py-2 text-xs text-zinc-400 hover:text-white transition"
                     >
                       Cancel
                     </button>
@@ -1998,18 +2495,31 @@ export function CalendarView({
       {logModalOpen && (
         <div
           onClick={() => setLogModalOpen(false)}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-md rounded-3xl border border-white/15 bg-[#121217] p-6 shadow-[0_24px_90px_rgba(0,0,0,0.85)]"
+            className="w-full max-w-md rounded-3xl border border-white/15 bg-[#121216] p-6 shadow-[0_24px_90px_rgba(0,0,0,0.9)]"
           >
-            <div className="flex items-center justify-between mb-5">
-              <div className="flex items-center gap-2">
-                <Timer className="w-4 h-4 text-emerald-400" />
-                <h2 className="text-lg font-bold text-white">
-                  Log Focus Session
-                </h2>
+            <div className="flex items-start justify-between mb-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <Timer className="w-4 h-4 text-emerald-400" />
+                  <h2 className="text-lg font-bold tracking-wide text-white">
+                    Log Focus Session
+                  </h2>
+                </div>
+                <div
+                  aria-hidden="true"
+                  className="mt-2 flex items-center gap-1.5"
+                >
+                  {Array.from({ length: 6 }).map((_, i) => (
+                    <span
+                      key={i}
+                      className="h-1 w-1 rounded-full bg-zinc-500/80"
+                    />
+                  ))}
+                </div>
               </div>
               <button
                 type="button"
@@ -2032,7 +2542,7 @@ export function CalendarView({
                     setLogTaskId(e.target.value);
                     setLogSubtaskId('');
                   }}
-                  className="w-full rounded-xl border border-white/10 bg-[#0A0A0C] px-3 py-2.5 text-sm text-white focus:border-white/30 focus:outline-none"
+                  className="w-full rounded-xl border border-white/15 bg-[#0A0A0C] px-3 py-2.5 text-sm text-white focus:border-white/40 focus:outline-none"
                 >
                   <option value="">Select a task...</option>
                   {boards.map((board) =>
@@ -2063,7 +2573,7 @@ export function CalendarView({
                     <select
                       value={logSubtaskId}
                       onChange={(e) => setLogSubtaskId(e.target.value)}
-                      className="w-full rounded-xl border border-white/10 bg-[#0A0A0C] px-3 py-2 text-sm text-white focus:border-white/30 focus:outline-none"
+                      className="w-full rounded-xl border border-white/15 bg-[#0A0A0C] px-3 py-2 text-sm text-white focus:border-white/40 focus:outline-none"
                     >
                       <option value="">None (log directly to task)</option>
                       {selectedLogTaskObj.task.subtasks.map((sub) => (
@@ -2085,7 +2595,7 @@ export function CalendarView({
                     required
                     value={logDate}
                     onChange={(e) => setLogDate(e.target.value)}
-                    className="w-full rounded-xl border border-white/10 bg-[#0A0A0C] px-3 py-2 text-sm text-white focus:border-white/30 focus:outline-none [color-scheme:dark]"
+                    className="w-full rounded-xl border border-white/15 bg-white/[0.07] px-3 py-2 text-sm text-white focus:border-white/40 focus:outline-none [color-scheme:dark]"
                   />
                 </div>
 
@@ -2097,7 +2607,7 @@ export function CalendarView({
                     type="time"
                     value={logStartTime}
                     onChange={(e) => setLogStartTime(e.target.value)}
-                    className="w-full rounded-xl border border-white/10 bg-[#0A0A0C] px-3 py-2 text-sm text-white focus:border-white/30 focus:outline-none [color-scheme:dark]"
+                    className="w-full rounded-xl border border-white/15 bg-white/[0.07] px-3 py-2 text-sm text-white focus:border-white/40 focus:outline-none [color-scheme:dark]"
                   />
                 </div>
               </div>
@@ -2112,10 +2622,10 @@ export function CalendarView({
                       key={m}
                       type="button"
                       onClick={() => setLogDurationMins(m)}
-                      className={`rounded-full px-2.5 py-1 text-[11px] font-mono border transition ${
+                      className={`rounded-full px-2.5 py-1 text-xs font-mono border transition ${
                         logDurationMins === m
                           ? 'bg-white text-[#0A0A0C] border-white font-semibold'
-                          : 'border-white/10 bg-[#0A0A0C] text-zinc-400 hover:text-white'
+                          : 'border-white/15 bg-white/[0.04] text-zinc-400 hover:text-white'
                       }`}
                     >
                       {m}m
@@ -2133,7 +2643,7 @@ export function CalendarView({
                       Math.max(1, Math.min(720, Number(e.target.value) || 1))
                     )
                   }
-                  className="w-full rounded-xl border border-white/10 bg-[#0A0A0C] px-3.5 py-2 text-sm font-mono text-white focus:border-white/30 focus:outline-none"
+                  className="w-full rounded-xl border border-white/15 bg-white/[0.07] px-3.5 py-2 text-sm font-mono text-white focus:border-white/40 focus:outline-none"
                 />
               </div>
 
@@ -2141,15 +2651,15 @@ export function CalendarView({
                 <label className="block text-xs font-medium text-zinc-400 mb-1.5">
                   Timer Mode
                 </label>
-                <div className="grid grid-cols-2 gap-1 rounded-full border border-white/10 bg-[#0A0A0C] p-1">
+                <div className="grid grid-cols-2 gap-1 rounded-full border border-white/15 bg-[#0A0A0C] p-1">
                   {(['pomodoro', 'normal'] as TimerMode[]).map((m) => (
                     <button
                       key={m}
                       type="button"
                       onClick={() => setLogTimerMode(m)}
-                      className={`rounded-full py-1.5 text-xs font-semibold capitalize transition ${
+                      className={`rounded-full py-1.5 text-xs font-medium capitalize transition ${
                         logTimerMode === m
-                          ? 'bg-white text-[#0A0A0C]'
+                          ? 'bg-white text-[#0A0A0C] font-semibold'
                           : 'text-zinc-400 hover:text-white'
                       }`}
                     >
@@ -2163,7 +2673,7 @@ export function CalendarView({
                 <button
                   type="button"
                   onClick={() => setLogModalOpen(false)}
-                  className="rounded-full border border-white/10 px-4 py-2 text-xs text-zinc-400 hover:text-white transition"
+                  className="rounded-full border border-white/15 px-4 py-2 text-xs text-zinc-400 hover:text-white transition"
                 >
                   Cancel
                 </button>
@@ -2179,6 +2689,141 @@ export function CalendarView({
           </div>
         </div>
       )}
+
+      {/* Floating Unclipped HUD Task Detail Popover */}
+      {hoveredCalendarItem &&
+        draggingTaskId === null &&
+        !scheduleModalOpen &&
+        !logModalOpen &&
+        (() => {
+          const { task, project, board, rect } = hoveredCalendarItem;
+          const popWidth = 280;
+          const winWidth =
+            typeof window !== 'undefined' ? window.innerWidth : 1200;
+          const winHeight =
+            typeof window !== 'undefined' ? window.innerHeight : 800;
+          const left = Math.max(
+            12,
+            Math.min(winWidth - popWidth - 12, rect.left)
+          );
+          const showAbove = rect.bottom + 210 > winHeight;
+          const completedSubs = task.subtasks.filter(
+            (s) => s.completed
+          ).length;
+
+          return (
+            <div
+              style={{
+                left,
+                top: showAbove
+                  ? Math.max(12, rect.top - 8)
+                  : Math.min(winHeight - 12, rect.bottom + 8),
+                transform: showAbove ? 'translateY(-100%)' : undefined,
+                borderColor: `${board.color}55`,
+              }}
+              className="pointer-events-none fixed z-50 w-[280px] rounded-2xl border bg-[#121218]/95 backdrop-blur-xl p-3.5 shadow-[0_20px_60px_rgba(0,0,0,0.85)]"
+            >
+              {/* Board / Project & Status Header */}
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span
+                    className="h-2 w-2 rounded-full shrink-0"
+                    style={{
+                      backgroundColor: board.color,
+                      boxShadow: `0 0 6px ${board.color}60`,
+                    }}
+                  />
+                  <span className="text-[10px] font-mono text-zinc-400 truncate">
+                    {board.name} / {project.name}
+                  </span>
+                </div>
+                <span
+                  className={`rounded-full px-2 py-0.5 text-[9px] font-mono shrink-0 ${
+                    task.completed
+                      ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-400/30'
+                      : 'bg-white/[0.06] text-zinc-300 border border-white/10'
+                  }`}
+                >
+                  {task.completed ? 'Done' : 'Scheduled'}
+                </span>
+              </div>
+
+              {/* Full Untruncated Task Title */}
+              <p
+                className={`text-sm font-semibold leading-snug break-words ${
+                  task.completed ? 'line-through text-zinc-400' : 'text-white'
+                }`}
+              >
+                {task.title}
+              </p>
+
+              {/* Schedule & Focus Telemetry */}
+              <div className="mt-2.5 flex flex-wrap items-center gap-1.5 text-[10px] font-mono text-zinc-300">
+                <span className="rounded-md bg-white/[0.06] border border-white/10 px-1.5 py-0.5">
+                  {task.scheduled_date
+                    ? formatShortDateLabel(task.scheduled_date)
+                    : 'Unscheduled'}
+                </span>
+                <span className="rounded-md bg-white/[0.06] border border-white/10 px-1.5 py-0.5">
+                  {task.scheduled_time || 'All day'}
+                </span>
+                {task.scheduled_duration_minutes && (
+                  <span className="rounded-md bg-white/[0.06] border border-white/10 px-1.5 py-0.5">
+                    {task.scheduled_duration_minutes}m
+                  </span>
+                )}
+                {task.time_spent_seconds > 0 && (
+                  <span className="rounded-md bg-emerald-500/10 border border-emerald-400/25 px-1.5 py-0.5 text-emerald-300">
+                    {formatLoggedDuration(task.time_spent_seconds)} focused
+                  </span>
+                )}
+              </div>
+
+              {/* Subtasks Summary */}
+              {task.subtasks.length > 0 && (
+                <div className="mt-2.5 pt-2 border-t border-white/[0.08]">
+                  <p className="text-[10px] font-mono text-zinc-400 mb-1">
+                    {completedSubs}/{task.subtasks.length} subtasks
+                  </p>
+                  <div className="space-y-1">
+                    {task.subtasks.slice(0, 4).map((sub) => (
+                      <div
+                        key={sub.id}
+                        className="flex items-center gap-1.5 text-[11px]"
+                      >
+                        <span
+                          className={`flex h-3 w-3 shrink-0 items-center justify-center rounded border ${
+                            sub.completed
+                              ? 'border-emerald-400 bg-emerald-400 text-[#0A0A0C]'
+                              : 'border-white/25'
+                          }`}
+                        >
+                          {sub.completed && (
+                            <Check className="w-2 h-2 stroke-[3]" />
+                          )}
+                        </span>
+                        <span
+                          className={`truncate ${
+                            sub.completed
+                              ? 'line-through text-zinc-500'
+                              : 'text-zinc-300'
+                          }`}
+                        >
+                          {sub.title}
+                        </span>
+                      </div>
+                    ))}
+                    {task.subtasks.length > 4 && (
+                      <p className="text-[10px] font-mono text-zinc-500 pl-4">
+                        +{task.subtasks.length - 4} more subtasks
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
     </div>
   );
 }

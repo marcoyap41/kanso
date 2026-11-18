@@ -229,6 +229,12 @@ export const api = {
 
   me: () => request<{ user: User }>('/api/auth/me'),
 
+  updateProfile: (name: string) =>
+    request<{ user: User }>('/api/auth/profile', {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    }),
+
   getHierarchy: () => request<{ boards: TaskBoard[] }>('/api/hierarchy'),
 
   createBoard: (payload: { name: string; color: string }) =>
@@ -277,7 +283,7 @@ export const api = {
     title: string;
     scheduled_date?: string | null;
     scheduled_time?: string | null;
-    scheduled_duration_minutes?: number;
+    scheduled_duration_minutes?: number | null;
   }) =>
     request<Task>('/api/tasks', {
       method: 'POST',
@@ -292,7 +298,7 @@ export const api = {
       add_seconds?: number;
       scheduled_date?: string | null;
       scheduled_time?: string | null;
-      scheduled_duration_minutes?: number;
+      scheduled_duration_minutes?: number | null;
       mode?: TimerMode;
       session_date?: string;
       started_at?: string | null;

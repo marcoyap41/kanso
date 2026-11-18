@@ -63,42 +63,94 @@ interface HomeViewProps {
   onGoToTaskManagement: () => void;
 }
 
+const ASIAN_CHAR_RE = /[\u3000-\u9fff\uac00-\ud7af\uff00-\uffef]/g;
+
+function getEffectiveNameLength(displayName: string): number {
+  const asianCount = (displayName.match(ASIAN_CHAR_RE) || []).length;
+  const otherCount = displayName.length - asianCount;
+  return otherCount + asianCount * 1.75;
+}
+
 /**
  * Radial coordinates (relative to viewport center) for up to 5 Task Boards
- * so they cleanly surround the center greeting cluster on desktop screens.
+ * so they dynamically expand around longer usernames without overlapping text.
  */
-function getRadialSlot(index: number, total: number): { x: number; y: number } {
+function getRadialSlot(
+  index: number,
+  total: number,
+  effectiveNameLen: number,
+  viewportWidth: number
+): { x: number; y: number } {
+  const extraX = Math.min(
+    180,
+    Math.max(0, Math.round((effectiveNameLen - 4) * 14))
+  );
+  const extraY = Math.min(
+    60,
+    Math.max(0, Math.round((effectiveNameLen - 6) * 5))
+  );
+  const maxSafeX = Math.max(305, Math.floor(viewportWidth / 2) - 132);
+  const clampX = (rawX: number) =>
+    Math.sign(rawX) * Math.min(Math.abs(rawX), maxSafeX);
+
   if (total === 1) {
-    return { x: 0, y: 205 };
+    return { x: 0, y: 215 + extraY };
   }
   if (total === 2) {
-    return index === 0 ? { x: -290, y: 15 } : { x: 290, y: 15 };
+    return {
+      x: clampX(index === 0 ? -(320 + extraX) : 320 + extraX),
+      y: 15,
+    };
   }
   if (total === 3) {
     const slots = [
-      { x: -300, y: -145 },
-      { x: 300, y: -145 },
-      { x: 0, y: 210 },
+      {
+        x: clampX(-(315 + Math.round(extraX * 0.8))),
+        y: -155 - Math.round(extraY * 0.5),
+      },
+      {
+        x: clampX(315 + Math.round(extraX * 0.8)),
+        y: -155 - Math.round(extraY * 0.5),
+      },
+      { x: 0, y: 215 + extraY },
     ];
-    return slots[index] || { x: 0, y: 210 };
+    return slots[index] || { x: 0, y: 215 + extraY };
   }
   if (total === 4) {
     const slots = [
-      { x: -305, y: -155 },
-      { x: 305, y: -155 },
-      { x: -335, y: 85 },
-      { x: 335, y: 85 },
+      {
+        x: clampX(-(315 + Math.round(extraX * 0.8))),
+        y: -165 - Math.round(extraY * 0.5),
+      },
+      {
+        x: clampX(315 + Math.round(extraX * 0.8)),
+        y: -165 - Math.round(extraY * 0.5),
+      },
+      {
+        x: clampX(-(350 + extraX)),
+        y: 95 + Math.round(extraY * 0.4),
+      },
+      {
+        x: clampX(350 + extraX),
+        y: 95 + Math.round(extraY * 0.4),
+      },
     ];
-    return slots[index] || { x: 0, y: 210 };
+    return slots[index] || { x: 0, y: 215 + extraY };
   }
   const slots5 = [
-    { x: -305, y: -165 },
-    { x: 305, y: -165 },
-    { x: -350, y: 40 },
-    { x: 350, y: 40 },
-    { x: 0, y: 215 },
+    {
+      x: clampX(-(315 + Math.round(extraX * 0.8))),
+      y: -175 - Math.round(extraY * 0.5),
+    },
+    {
+      x: clampX(315 + Math.round(extraX * 0.8)),
+      y: -175 - Math.round(extraY * 0.5),
+    },
+    { x: clampX(-(365 + extraX)), y: 45 },
+    { x: clampX(365 + extraX), y: 45 },
+    { x: 0, y: 225 + extraY },
   ];
-  return slots5[index] || { x: 0, y: 215 };
+  return slots5[index] || { x: 0, y: 225 + extraY };
 }
 
 const REEL_VARIANTS = {
@@ -171,6 +223,7 @@ export function HomeView({
     null
   );
   const [setTimerOpen, setSetTimerOpen] = useState(false);
+  const [hoveredBoardId, setHoveredBoardId] = useState<number | null>(null);
   const [openPathDropdown, setOpenPathDropdown] = useState<
     'project' | 'task' | 'subtask' | null
   >(null);
@@ -182,6 +235,18 @@ export function HomeView({
   const lastOrderRef = useRef<number>(0);
 
   const { dayName, formattedDate } = formatKansoDate(new Date());
+  const displayName = user.name || user.username || user.email.split('@')[0];
+  const effectiveNameLen = getEffectiveNameLength(displayName);
+  const [viewportWidth, setViewportWidth] = useState<number>(() =>
+    typeof window !== 'undefined' ? window.innerWidth : 1440
+  );
+
+  useEffect(() => {
+    const handleResize = () => setViewportWidth(window.innerWidth);
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   // Close spread automatically when entering working mode
   useEffect(() => {
@@ -275,7 +340,7 @@ export function HomeView({
           }}
           title="Back to main Home page"
           aria-label="Back to main Home page"
-          className="absolute top-5 right-6 sm:top-7 sm:right-10 z-30 inline-flex h-11 w-11 items-center justify-center rounded-full border border-white/10 bg-[#141418] hover:border-white/30 hover:bg-white hover:text-[#0A0A0C] text-zinc-400 transition"
+          className="absolute top-5 right-6 sm:top-7 sm:right-10 z-30 inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/15 bg-white/[0.04] hover:border-white/40 hover:text-white text-zinc-400 transition"
         >
           <X className="w-4 h-4" />
         </button>
@@ -290,21 +355,66 @@ export function HomeView({
             transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
             className="relative w-full max-w-5xl flex flex-col items-center justify-center min-h-[540px]"
           >
-            {/* Stage 1: Minimal Centered Greeting + PLAY button */}
+            {/* Stage 1: Centered Greeting + Circular Expandable PLAY Trigger */}
             <div className="relative z-20 text-center flex flex-col items-center">
-              <p className="text-xs sm:text-sm font-medium tracking-[0.14em] uppercase text-zinc-500">
-                {dayName}, <span className="font-mono">{formattedDate}</span>
+              {/* Glowing Minimal Emblem */}
+              <div
+                aria-hidden="true"
+                className="mb-3 flex items-center justify-center drop-shadow-[0_0_14px_rgba(255,255,255,0.75)]"
+              >
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                  <rect x="4" y="4" width="4.5" height="7" rx="1" fill="#FFFFFF" />
+                  <rect x="10.5" y="4" width="3.5" height="12" rx="1" fill="#FFFFFF" />
+                  <rect x="16" y="7" width="4" height="5" rx="1" fill="#FFFFFF" />
+                  <circle cx="6.2" cy="15.5" r="1.7" fill="#FFFFFF" />
+                  <circle cx="17.8" cy="16.5" r="1.4" fill="#FFFFFF" />
+                </svg>
+              </div>
+
+              <p className="text-[11px] font-mono tracking-[0.22em] uppercase text-zinc-500">
+                {dayName} // {formattedDate}
               </p>
 
-              <p className="mt-2.5 text-sm sm:text-base text-zinc-400 font-normal">
-                Make it yours
+              <p className="mt-2.5 text-sm sm:text-base text-zinc-400 font-medium tracking-wide">
+                —Make it yours
               </p>
 
-              <h1 className="mt-2 text-5xl sm:text-7xl font-bold tracking-[-0.04em] leading-[1.03] text-white">
-                Hello, {user.name || user.username || user.email.split('@')[0]}
+              {/* Six subtle dots */}
+              <div
+                aria-hidden="true"
+                className="mt-2 mb-3 flex items-center justify-center gap-1.5"
+              >
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <span
+                    key={i}
+                    className="h-1 w-1 rounded-full bg-zinc-500/80"
+                  />
+                ))}
+              </div>
+
+              <h1
+                className={`font-bold tracking-[-0.04em] leading-[1.03] text-white inline-flex items-center justify-center ${
+                  effectiveNameLen > 13
+                    ? 'text-3xl sm:text-5xl'
+                    : effectiveNameLen > 9
+                      ? 'text-4xl sm:text-6xl'
+                      : 'text-5xl sm:text-7xl'
+                }`}
+              >
+                <span>Hello, {displayName}</span>
+                <span
+                  aria-hidden="true"
+                  className={`inline-block w-[3px] sm:w-[4px] bg-white rounded-[1px] shadow-[0_0_12px_rgba(255,255,255,0.9)] animate-kanso-caret ml-2.5 shrink-0 ${
+                    effectiveNameLen > 13
+                      ? 'h-8 sm:h-11'
+                      : effectiveNameLen > 9
+                        ? 'h-9 sm:h-12'
+                        : 'h-10 sm:h-14'
+                  }`}
+                />
               </h1>
 
-              {/* PLAY Button [hover: start working out] */}
+              {/* Circular Expandable PLAY Button [hover: start working out] */}
               <div className="mt-9">
                 <button
                   type="button"
@@ -321,14 +431,12 @@ export function HomeView({
                   ) : (
                     <Play className="w-5 h-5 fill-[#0A0A0C] shrink-0" />
                   )}
-                  <span className="max-w-0 overflow-hidden whitespace-nowrap text-sm font-bold tracking-tight opacity-0 group-hover:max-w-[170px] group-hover:opacity-100 transition-all duration-300">
+                  <span className="max-w-0 overflow-hidden whitespace-nowrap text-sm font-bold tracking-tight opacity-0 group-hover:max-w-[180px] group-hover:opacity-100 transition-all duration-300">
                     {boardsSpreadOpen
                       ? boards.length === 0
                         ? 'close'
                         : 'close boards'
-                      : boards.length === 0
-                        ? 'no task boards'
-                        : 'start working out'}
+                      : 'start working out'}
                   </span>
                 </button>
               </div>
@@ -342,25 +450,35 @@ export function HomeView({
                   animate={{ opacity: 1, y: 0, scale: 1 }}
                   exit={{ opacity: 0, y: 10, scale: 0.96 }}
                   transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
-                  className="relative z-20 mt-8 w-full max-w-md rounded-3xl border border-white/15 bg-[#121216]/95 backdrop-blur-xl p-6 text-center shadow-[0_24px_80px_rgba(0,0,0,0.75)]"
+                  className="relative z-20 mt-8 w-full max-w-md rounded-3xl border border-white/15 bg-[#121216]/95 backdrop-blur-xl p-6 text-center shadow-[0_24px_80px_rgba(0,0,0,0.85)]"
                 >
-                  <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-2xl border border-white/15 bg-white/[0.06]">
-                    <Layers className="w-5 h-5 text-zinc-300" />
+                  <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-2xl border border-white/15 bg-white/[0.06]">
+                    <Layers className="w-4 h-4 text-zinc-200" />
                   </div>
-                  <h2 className="text-base font-bold text-white">
-                    No task boards yet
+                  <h2 className="text-base font-semibold tracking-wide text-white">
+                    No task boards yet—
                   </h2>
-                  <p className="mt-1.5 text-xs text-zinc-400 leading-relaxed">
-                    You don&apos;t have any task boards yet. Add your first
-                    board in Task Management to start organizing projects and
-                    focus sessions.
+                  <div
+                    aria-hidden="true"
+                    className="mt-2 mb-3 flex items-center justify-center gap-1.5"
+                  >
+                    {Array.from({ length: 6 }).map((_, i) => (
+                      <span
+                        key={i}
+                        className="h-1 w-1 rounded-full bg-zinc-500/80"
+                      />
+                    ))}
+                  </div>
+                  <p className="text-xs text-zinc-400 leading-relaxed">
+                    Create a task board in Task Management to organize your
+                    projects and focus sessions.
                   </p>
                   <button
                     type="button"
                     onClick={onGoToTaskManagement}
-                    className="mt-5 inline-flex items-center gap-2 rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 px-5 py-2.5 text-xs font-semibold shadow-[0_0_24px_rgba(255,255,255,0.16)] transition"
+                    className="mt-5 inline-flex items-center gap-2 rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 px-5 py-2.5 text-xs font-semibold transition"
                   >
-                    <span>Add Task Board in Task Management</span>
+                    <span>Add Task Board</span>
                     <ArrowRight className="w-3.5 h-3.5" />
                   </button>
                 </motion.div>
@@ -368,17 +486,72 @@ export function HomeView({
                 <>
                   {/* Desktop radial spread */}
                   <div className="hidden lg:block pointer-events-none absolute inset-0 z-10">
+                    {/* Colored radial connection lines from center Play button to each board */}
+                    <svg
+                      className="pointer-events-none absolute left-1/2 top-1/2 w-[1px] h-[1px] overflow-visible"
+                      aria-hidden="true"
+                    >
+                      {boards.slice(0, 5).map((board, idx, list) => {
+                        const slot = getRadialSlot(
+                          idx,
+                          list.length,
+                          effectiveNameLen,
+                          viewportWidth
+                        );
+                        const isHovered = hoveredBoardId === board.id;
+
+                        return (
+                          <motion.line
+                            key={`tether-${board.id}`}
+                            x1={0}
+                            y1={44}
+                            x2={slot.x}
+                            y2={slot.y}
+                            stroke={board.color}
+                            strokeWidth={isHovered ? 1.75 : 1.25}
+                            strokeDasharray="4 5"
+                            strokeLinecap="round"
+                            initial={{ pathLength: 0, opacity: 0 }}
+                            animate={{
+                              pathLength: 1,
+                              opacity: isHovered ? 0.7 : 0.28,
+                            }}
+                            exit={{ opacity: 0 }}
+                            transition={{
+                              duration: 0.35,
+                              delay: idx * 0.04,
+                            }}
+                          />
+                        );
+                      })}
+                    </svg>
+
                     {boards.slice(0, 5).map((board, idx, list) => {
-                      const slot = getRadialSlot(idx, list.length);
+                      const slot = getRadialSlot(
+                        idx,
+                        list.length,
+                        effectiveNameLen,
+                        viewportWidth
+                      );
                       const projectLabel = `${board.projects.length} ${
                         board.projects.length === 1 ? 'project' : 'projects'
                       }`;
+                      const isHovered = hoveredBoardId === board.id;
 
                       return (
                         <motion.button
                           key={board.id}
                           type="button"
-                          onClick={() => setInspectingBoardId(board.id)}
+                          onClick={() => {
+                            setHoveredBoardId(null);
+                            setInspectingBoardId(board.id);
+                          }}
+                          onMouseEnter={() => setHoveredBoardId(board.id)}
+                          onMouseLeave={() =>
+                            setHoveredBoardId((prev) =>
+                              prev === board.id ? null : prev
+                            )
+                          }
                           initial={{
                             x: 0,
                             y: 0,
@@ -409,13 +582,19 @@ export function HomeView({
                             top: '50%',
                             marginLeft: '-112px',
                             marginTop: '-52px',
+                            borderColor: isHovered
+                              ? `${board.color}75`
+                              : `${board.color}38`,
                           }}
-                          className="pointer-events-auto absolute w-56 rounded-2xl border border-white/15 bg-[#121216]/95 hover:border-white/40 hover:bg-[#191920] p-4 text-left backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.75)] transition-colors"
+                          className="pointer-events-auto absolute w-56 rounded-2xl border bg-[#121216]/95 hover:bg-[#191920] p-4 text-left backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.75)] transition-colors"
                         >
                           <div className="flex items-center justify-between gap-2 mb-2">
                             <span
                               className="h-2.5 w-2.5 rounded-full shrink-0"
-                              style={{ backgroundColor: board.color }}
+                              style={{
+                                backgroundColor: board.color,
+                                boxShadow: `0 0 6px ${board.color}60`,
+                              }}
                             />
                             <span className="text-[10px] font-mono text-zinc-500">
                               {projectLabel}
@@ -461,12 +640,16 @@ export function HomeView({
                           key={board.id}
                           type="button"
                           onClick={() => setInspectingBoardId(board.id)}
-                          className="rounded-2xl border border-white/15 bg-[#121216]/95 hover:border-white/35 p-4 text-left transition"
+                          style={{ borderColor: `${board.color}38` }}
+                          className="rounded-2xl border bg-[#121216]/95 hover:!border-white/40 p-4 text-left transition"
                         >
-                          <div className="flex items-center justify-between gap-2 mb-1.5">
+                          <div className="flex items-center justify-between gap-2 mb-2">
                             <span
-                              className="h-2.5 w-2.5 rounded-full"
-                              style={{ backgroundColor: board.color }}
+                              className="h-2.5 w-2.5 rounded-full shrink-0"
+                              style={{
+                                backgroundColor: board.color,
+                                boxShadow: `0 0 6px ${board.color}60`,
+                              }}
                             />
                             <span className="text-[10px] font-mono text-zinc-500">
                               {projectLabel}
@@ -500,7 +683,7 @@ export function HomeView({
             </AnimatePresence>
           </motion.div>
         ) : !isWorkingMode && inspectingBoard ? (
-          /* Stage 2B: Smooth Split View — Left: Task Board & Project Boxes | Right: "What are we working on?" + Slot-Machine Reel */
+          /* Stage 2B: Smooth Split View — Left: Task Board & Project HUD Cards | Right: "What are we working on—" + HUD Caret Reel */
           <motion.div
             key={`home-board-${inspectingBoard.id}`}
             initial={{ opacity: 0, y: 18, scale: 0.98 }}
@@ -519,7 +702,7 @@ export function HomeView({
                       clearReel();
                       setInspectingBoardId(null);
                     }}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-[#141418] hover:bg-white hover:text-[#0A0A0C] px-3.5 py-2 text-xs font-medium text-zinc-300 transition shrink-0"
+                    className="inline-flex items-center gap-1.5 rounded-full border border-white/15 bg-white/[0.04] hover:border-white/35 px-3.5 py-1.5 text-xs font-medium text-zinc-300 hover:text-white transition shrink-0"
                   >
                     <ArrowLeft className="w-3.5 h-3.5" />
                     <span>All boards</span>
@@ -528,7 +711,10 @@ export function HomeView({
                   <div className="flex items-center gap-2.5 min-w-0">
                     <span
                       className="h-3 w-3 rounded-full shrink-0"
-                      style={{ backgroundColor: inspectingBoard.color }}
+                      style={{
+                        backgroundColor: inspectingBoard.color,
+                        boxShadow: `0 0 7px ${inspectingBoard.color}60`,
+                      }}
                     />
                     <h2 className="text-2xl sm:text-3xl font-bold tracking-[-0.03em] text-white truncate">
                       {inspectingBoard.name}
@@ -538,7 +724,7 @@ export function HomeView({
               </div>
 
               {inspectingBoard.projects.length === 0 ? (
-                <div className="rounded-3xl border border-dashed border-white/15 bg-[#111115] p-10 text-center">
+                <div className="rounded-3xl border border-dashed border-white/15 bg-white/[0.02] p-10 text-center">
                   <p className="text-sm text-zinc-400 mb-4">
                     No projects inside{' '}
                     <strong className="text-white">
@@ -549,7 +735,7 @@ export function HomeView({
                   <button
                     type="button"
                     onClick={onGoToTaskManagement}
-                    className="rounded-full bg-white text-[#0A0A0C] px-5 py-2.5 text-xs font-semibold hover:bg-zinc-200 transition"
+                    className="rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 px-5 py-2 text-xs font-semibold transition"
                   >
                     Add in Task Management
                   </button>
@@ -576,9 +762,9 @@ export function HomeView({
                             projectOrder
                           )
                         }
-                        className="group/box rounded-3xl border border-white/15 bg-[#121216]/95 hover:border-white/40 hover:bg-[#16161C] p-5 sm:p-6 transition-all shadow-[0_20px_60px_rgba(0,0,0,0.6)] flex flex-col justify-between"
+                        style={{ borderColor: `${inspectingBoard.color}30` }}
+                        className="group/box rounded-3xl border bg-white/[0.035] hover:!border-white/35 hover:bg-white/[0.05] p-5 sm:p-6 transition-all shadow-[0_20px_60px_rgba(0,0,0,0.45)] flex flex-col justify-between"
                       >
-                        {/* Strongly Highlighted Project Title Header */}
                         <div>
                           <button
                             type="button"
@@ -608,12 +794,12 @@ export function HomeView({
                               style={{ backgroundColor: inspectingBoard.color }}
                             />
                             <div className="flex items-start justify-between gap-2">
-                              <h3 className="text-xl sm:text-2xl font-extrabold tracking-[-0.03em] text-white leading-snug group-hover/proj:text-zinc-100 transition">
+                              <h3 className="text-xl sm:text-2xl font-bold tracking-[-0.02em] text-white leading-snug group-hover/proj:text-zinc-100 transition">
                                 {project.name}
                               </h3>
-                              <span className="mt-1 rounded-full border border-white/10 bg-[#1B1B22] px-2.5 py-0.5 text-[10px] font-mono text-zinc-400 shrink-0">
-                                {project.tasks.length} task
-                                {project.tasks.length === 1 ? '' : 's'}
+                              <span className="mt-1 rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-0.5 text-[11px] text-zinc-400 shrink-0">
+                                {project.tasks.length}{' '}
+                                {project.tasks.length === 1 ? 'task' : 'tasks'}
                               </span>
                             </div>
                             {project.description && (
@@ -627,7 +813,7 @@ export function HomeView({
                           <div className="mt-4 pt-3.5 border-t border-white/[0.08] space-y-2">
                             {project.tasks.length === 0 ? (
                               <p className="text-xs text-zinc-600">
-                                No tasks yet.
+                                No tasks added yet.
                               </p>
                             ) : (
                               project.tasks.map((task) => {
@@ -637,7 +823,7 @@ export function HomeView({
                                 return (
                                   <div
                                     key={task.id}
-                                    className="rounded-xl border border-white/[0.07] bg-[#0B0B0E] hover:border-white/30 hover:bg-white/[0.05] transition"
+                                    className="rounded-xl border border-white/[0.08] bg-[#0B0B0F] hover:border-white/25 hover:bg-white/[0.05] transition"
                                   >
                                     <div
                                       onMouseEnter={(e) => {
@@ -648,7 +834,7 @@ export function HomeView({
                                           taskOrder
                                         );
                                       }}
-                                      className="w-full flex items-center gap-2.5 px-3.5 py-2.5"
+                                      className="w-full flex items-center gap-2.5 px-3 py-2.5"
                                     >
                                       <button
                                         type="button"
@@ -720,7 +906,7 @@ export function HomeView({
                                                   subOrder
                                                 );
                                               }}
-                                              className="group/sub w-full flex items-center gap-2 rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/[0.07] hover:text-white transition"
+                                              className="group/sub w-full flex items-center gap-2 rounded-lg px-2 py-1 text-xs text-zinc-400 hover:bg-white/[0.06] hover:text-white transition"
                                             >
                                               <span
                                                 aria-hidden="true"
@@ -799,16 +985,29 @@ export function HomeView({
               )}
             </div>
 
-            {/* Right Side: "What are we working on?" + Slot-Machine Vertical Text Reel */}
+            {/* Right Side: "What are we working on—" + Dark Translucent Reel Bar + Active Caret */}
             <div className="lg:col-span-5 lg:sticky lg:top-28 flex flex-col justify-center min-h-[220px] lg:min-h-[440px]">
-              <h2 className="text-3xl sm:text-5xl font-bold tracking-[-0.04em] leading-[1.08] text-white">
+              <h2 className="text-3xl sm:text-5xl font-bold tracking-[-0.03em] leading-[1.08] text-white">
                 What are we
                 <br />
-                working on?
+                working on—
               </h2>
 
-              {/* Lottery / Slot-Machine Blank Fill */}
-              <div className="relative mt-6 min-h-[4.5rem] sm:min-h-[5.5rem] overflow-hidden border-b-2 border-white/25 flex items-center [perspective:800px]">
+              {/* Six subtle dots divider */}
+              <div
+                aria-hidden="true"
+                className="mt-3 mb-5 flex items-center gap-1.5"
+              >
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <span
+                    key={i}
+                    className="h-1 w-1 rounded-full bg-zinc-500/80"
+                  />
+                ))}
+              </div>
+
+              {/* Input-Style Reel Bar with Bold Blinking Vertical Typing Line */}
+              <div className="relative min-h-[4.5rem] sm:min-h-[5.25rem] overflow-hidden rounded-2xl bg-white/[0.07] border border-white/15 px-5 py-3 flex items-center [perspective:800px]">
                 <AnimatePresence
                   mode="popLayout"
                   custom={reelDirection}
@@ -827,10 +1026,10 @@ export function HomeView({
                       damping: 28,
                       mass: 0.7,
                     }}
-                    className="w-full py-2"
+                    className="w-full py-1"
                   >
                     {reelState ? (
-                      <div className="text-xl sm:text-3xl font-bold tracking-[-0.02em] text-white leading-tight flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <div className="text-lg sm:text-2xl font-semibold tracking-wide text-white leading-tight flex flex-wrap items-center gap-x-2 gap-y-1">
                         {reelState.text.split(' > ').map((part, idx, arr) => (
                           <React.Fragment key={idx}>
                             <span
@@ -844,7 +1043,7 @@ export function HomeView({
                             </span>
                             {idx < arr.length - 1 && (
                               <span
-                                className="font-mono text-lg sm:text-2xl"
+                                className="font-mono text-base sm:text-xl"
                                 style={{ color: inspectingBoard.color }}
                               >
                                 &gt;
@@ -852,15 +1051,27 @@ export function HomeView({
                             )}
                           </React.Fragment>
                         ))}
+                        <span
+                          aria-hidden="true"
+                          className="inline-block w-[3px] h-6 bg-white rounded-[1px] shadow-[0_0_10px_rgba(255,255,255,0.95)] animate-kanso-caret ml-1 shrink-0"
+                        />
                       </div>
                     ) : (
-                      <span className="text-2xl sm:text-3xl font-mono text-zinc-700 tracking-widest select-none">
-                        _______
-                      </span>
+                      <div className="flex items-center justify-center w-full">
+                        <span
+                          aria-hidden="true"
+                          className="inline-block w-[3px] h-6 bg-white rounded-[1px] shadow-[0_0_10px_rgba(255,255,255,0.95)] animate-kanso-caret"
+                        />
+                      </div>
                     )}
                   </motion.div>
                 </AnimatePresence>
               </div>
+
+              <p className="mt-2.5 text-[11px] text-zinc-500">
+                *Select a project, task, or subtask on the left to initialize
+                focus timer
+              </p>
             </div>
           </motion.div>
         ) : (
@@ -888,7 +1099,7 @@ export function HomeView({
                   onExitWorkingMode();
                 }}
                 title="Open task board selection"
-                className="inline-flex items-center gap-2 rounded-full border border-transparent hover:border-white/15 hover:bg-white/[0.04] px-3 py-1 text-xs text-zinc-400 hover:text-white transition"
+                className="inline-flex items-center gap-2 rounded-full border border-transparent hover:border-white/15 hover:bg-white/[0.04] px-3 py-1 text-xs font-medium text-zinc-400 hover:text-white transition"
               >
                 {activeBoard && (
                   <span
@@ -903,7 +1114,7 @@ export function HomeView({
             {/* Working on [projectname] > [taskname] > [subtaskname:ifany] + Direct Segment Switcher */}
             <div className="relative flex flex-col items-center">
               <div className="flex flex-wrap items-center justify-center gap-3">
-                <h1 className="text-2xl sm:text-4xl font-bold tracking-[-0.03em] text-white flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
+                <h1 className="text-2xl sm:text-4xl font-bold tracking-[-0.02em] text-white flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
                   <span>Working on</span>
 
                   {activeProject ? (
@@ -918,7 +1129,7 @@ export function HomeView({
                       title={`Switch project in ${activeBoard?.name || 'board'}`}
                       className={`rounded-lg px-2 py-0.5 -mx-1 underline-offset-4 transition focus:outline-none ${
                         openPathDropdown === 'project'
-                          ? 'bg-white/10 ring-1 ring-white/25 underline font-bold'
+                          ? 'bg-white/10 ring-1 ring-white/30 underline font-bold'
                           : 'hover:bg-white/[0.06] hover:underline'
                       }`}
                     >
@@ -944,7 +1155,7 @@ export function HomeView({
                         title={`Switch task in ${activeProject?.name || 'project'}`}
                         className={`rounded-lg px-2 py-0.5 -mx-1 underline-offset-4 transition focus:outline-none ${
                           openPathDropdown === 'task'
-                            ? 'bg-white/10 ring-1 ring-white/25 underline font-bold'
+                            ? 'bg-white/10 ring-1 ring-white/30 underline font-bold'
                             : 'hover:bg-white/[0.06] hover:underline'
                         }`}
                       >
@@ -967,7 +1178,7 @@ export function HomeView({
                         title={`Switch subtask in ${activeTask?.title || 'task'}`}
                         className={`rounded-lg px-2 py-0.5 -mx-1 underline-offset-4 transition focus:outline-none ${
                           openPathDropdown === 'subtask'
-                            ? 'bg-white/10 ring-1 ring-white/25 underline font-bold'
+                            ? 'bg-white/10 ring-1 ring-white/30 underline font-bold'
                             : 'hover:bg-white/[0.06] hover:underline'
                         }`}
                       >
@@ -978,11 +1189,24 @@ export function HomeView({
                 </h1>
 
                 {isTargetCompleted && (
-                  <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-400/30 bg-emerald-500/15 px-3 py-1 text-xs font-semibold text-emerald-300">
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-400/35 bg-emerald-500/15 px-3 py-1 text-xs font-medium text-emerald-300">
                     <CheckCircle2 className="w-3.5 h-3.5" />
                     <span>Marked as Done</span>
                   </span>
                 )}
+              </div>
+
+              {/* Six subtle dots divider */}
+              <div
+                aria-hidden="true"
+                className="mt-3 flex items-center justify-center gap-1.5"
+              >
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <span
+                    key={i}
+                    className="h-1 w-1 rounded-full bg-zinc-500/80"
+                  />
+                ))}
               </div>
 
               {/* Inline Direct Directory Switcher Dropdown */}
@@ -993,19 +1217,19 @@ export function HomeView({
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     exit={{ opacity: 0, y: -6, scale: 0.97 }}
                     transition={{ duration: 0.18 }}
-                    className="mt-4 w-full max-w-sm rounded-2xl border border-white/15 bg-[#121216]/95 backdrop-blur-xl p-2 shadow-[0_24px_80px_rgba(0,0,0,0.85)] text-left z-40"
+                    className="mt-4 w-full max-w-sm rounded-2xl border border-white/15 bg-[#121216]/95 backdrop-blur-xl p-2 shadow-[0_24px_80px_rgba(0,0,0,0.8)] text-left z-40"
                   >
                     {openPathDropdown === 'project' && activeBoard && (
                       <div className="space-y-1">
                         <div className="px-3 py-2 mb-1.5 flex items-center flex-wrap gap-1.5 border-b border-white/10">
                           <span
-                            className="px-2 py-0.5 rounded-md font-black tracking-wider text-xs border"
+                            className="px-2 py-0.5 rounded-md font-bold text-xs border"
                             style={getHeaderBadgeStyle(activeBoard.color)}
                           >
-                            PROJECTS
+                            Projects
                           </span>
-                          <span className="font-bold text-zinc-300 text-[11px] tracking-wider uppercase">
-                            IN
+                          <span className="font-medium text-zinc-400 text-xs">
+                            in
                           </span>
                           <span
                             className="font-bold truncate text-xs"
@@ -1047,7 +1271,8 @@ export function HomeView({
                                   isCurrent ? 'text-zinc-700' : 'text-zinc-500'
                                 }`}
                               >
-                                {proj.tasks.length}t
+                                {proj.tasks.length}{' '}
+                                {proj.tasks.length === 1 ? 'task' : 'tasks'}
                               </span>
                             </button>
                           );
@@ -1061,13 +1286,13 @@ export function HomeView({
                         <div className="space-y-1 max-h-64 overflow-y-auto">
                           <div className="px-3 py-2 mb-1.5 flex items-center flex-wrap gap-1.5 border-b border-white/10">
                             <span
-                              className="px-2 py-0.5 rounded-md font-black tracking-wider text-xs border"
+                              className="px-2 py-0.5 rounded-md font-bold text-xs border"
                               style={getHeaderBadgeStyle(activeBoard?.color)}
                             >
-                              TASKS
+                              Tasks
                             </span>
-                            <span className="font-bold text-zinc-300 text-[11px] tracking-wider uppercase">
-                              IN
+                            <span className="font-medium text-zinc-400 text-xs">
+                              in
                             </span>
                             <span className="font-bold text-white truncate text-xs">
                               {activeProject.name}
@@ -1167,13 +1392,13 @@ export function HomeView({
                         <div className="space-y-1 max-h-64 overflow-y-auto">
                           <div className="px-3 py-2 mb-1.5 flex items-center flex-wrap gap-1.5 border-b border-white/10">
                             <span
-                              className="px-2 py-0.5 rounded-md font-black tracking-wider text-xs border"
+                              className="px-2 py-0.5 rounded-md font-bold text-xs border"
                               style={getHeaderBadgeStyle(activeBoard?.color)}
                             >
-                              SUBTASKS
+                              Subtasks
                             </span>
-                            <span className="font-bold text-zinc-300 text-[11px] tracking-wider uppercase">
-                              IN
+                            <span className="font-medium text-zinc-400 text-xs">
+                              in
                             </span>
                             <span className="font-bold text-white truncate text-xs">
                               {activeTask.title}
@@ -1236,12 +1461,12 @@ export function HomeView({
               </AnimatePresence>
             </div>
 
-            {/* Centered Large Timer */}
-            <div className="my-8 sm:my-10">
-              <div className="text-7xl sm:text-8xl font-mono font-bold tracking-tight text-white tabular-nums leading-none">
+            {/* Centered Framed HUD Timer */}
+            <div className="my-7 sm:my-9 w-full max-w-md rounded-3xl border border-white/15 bg-white/[0.04] px-8 sm:px-14 py-6 sm:py-8 shadow-[0_0_40px_rgba(255,255,255,0.04)]">
+              <div className="text-6xl sm:text-8xl font-mono font-bold tracking-tight text-white tabular-nums leading-none">
                 {formatTimerClock(displaySeconds)}
               </div>
-              <p className="mt-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
+              <p className="mt-3 text-xs font-mono text-zinc-400">
                 {timerMode === 'pomodoro'
                   ? `Pomodoro ${
                       pomodoroPreset === 'custom'
@@ -1252,13 +1477,13 @@ export function HomeView({
               </p>
             </div>
 
-            {/* Controls: Play button [start working], set timer, plus icon-only Reset, Pop out, Mark/Unmark Done */}
-            <div className="flex flex-wrap items-center justify-center gap-2.5">
+            {/* Rounded Pill Action Controls */}
+            <div className="flex flex-wrap items-center justify-center gap-3">
               <button
                 type="button"
                 onClick={onToggleRun}
                 aria-label={isRunning ? 'pause' : 'start working'}
-                className="group inline-flex items-center justify-center gap-2.5 rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 h-14 px-7 text-sm font-semibold shadow-[0_0_36px_rgba(255,255,255,0.18)] transition"
+                className="group inline-flex items-center justify-center gap-2.5 rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 h-14 px-8 text-sm font-semibold shadow-[0_0_40px_rgba(255,255,255,0.18)] transition"
               >
                 {isRunning ? (
                   <>
@@ -1290,8 +1515,8 @@ export function HomeView({
                 onClick={() => setSetTimerOpen((prev) => !prev)}
                 className={`inline-flex items-center gap-2 rounded-full border h-14 px-6 text-sm font-medium transition ${
                   setTimerOpen
-                    ? 'border-white/35 bg-[#1D1D24] text-white'
-                    : 'border-white/10 bg-[#15151A] hover:border-white/25 text-zinc-200'
+                    ? 'border-white/40 bg-white/[0.12] text-white'
+                    : 'border-white/15 bg-white/[0.04] hover:border-white/30 text-zinc-200'
                 }`}
               >
                 <SlidersHorizontal className="w-4 h-4 text-zinc-400" />
@@ -1303,7 +1528,7 @@ export function HomeView({
                 onClick={onResetTimer}
                 title="Reset timer"
                 aria-label="Reset timer"
-                className="inline-flex h-14 w-14 items-center justify-center rounded-full border border-white/10 bg-[#15151A] hover:border-white/25 text-zinc-300 hover:text-white transition"
+                className="inline-flex h-14 w-14 items-center justify-center rounded-full border border-white/15 bg-white/[0.04] hover:border-white/30 text-zinc-300 hover:text-white transition"
               >
                 <RotateCcw className="w-4 h-4" />
               </button>
@@ -1313,7 +1538,7 @@ export function HomeView({
                 onClick={onPopoutOverlay}
                 title="Pop out overlay"
                 aria-label="Pop out overlay"
-                className="inline-flex h-14 w-14 items-center justify-center rounded-full border border-white/10 bg-[#15151A] hover:border-white/25 text-zinc-300 hover:text-white transition"
+                className="inline-flex h-14 w-14 items-center justify-center rounded-full border border-white/15 bg-white/[0.04] hover:border-white/30 text-zinc-300 hover:text-white transition"
               >
                 <ExternalLink className="w-4 h-4" />
               </button>
@@ -1328,15 +1553,15 @@ export function HomeView({
                 }
                 className={`inline-flex h-14 w-14 items-center justify-center rounded-full border transition ${
                   isTargetCompleted
-                    ? 'border-emerald-400/40 bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30'
-                    : 'border-white/10 bg-[#15151A] hover:border-emerald-400/40 hover:bg-emerald-500/15 text-zinc-300 hover:text-emerald-300 disabled:opacity-40'
+                    ? 'border-emerald-400/50 bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30'
+                    : 'border-white/15 bg-white/[0.04] hover:border-emerald-400/45 hover:bg-emerald-500/15 text-zinc-300 hover:text-emerald-300 disabled:opacity-40'
                 }`}
               >
                 <CheckCircle2 className="w-4 h-4" />
               </button>
             </div>
 
-            {/* Compact Set Timer Drawer (mode & duration configuration only) */}
+            {/* Compact Set Timer Drawer */}
             <AnimatePresence initial={false}>
               {setTimerOpen && (
                 <motion.div
@@ -1346,7 +1571,7 @@ export function HomeView({
                   transition={{ duration: 0.22 }}
                   className="w-full max-w-md overflow-hidden mt-5"
                 >
-                  <div className="rounded-3xl border border-white/10 bg-[#121216] p-5 space-y-4 text-left">
+                  <div className="rounded-3xl border border-white/15 bg-[#121216] p-5 space-y-4 text-left">
                     <div className="flex flex-wrap items-center justify-center gap-2">
                       {(['25:5', '50:10', 'custom'] as PomodoroPreset[]).map(
                         (preset) => (
@@ -1360,7 +1585,7 @@ export function HomeView({
                               timerMode === 'pomodoro' &&
                               pomodoroPreset === preset
                                 ? 'bg-white text-[#0A0A0C] border-white font-semibold'
-                                : 'bg-[#18181E] text-zinc-300 border-white/10 hover:border-white/25'
+                                : 'bg-white/[0.04] text-zinc-300 border-white/15 hover:border-white/35'
                             }`}
                           >
                             {preset === 'custom'
@@ -1376,7 +1601,7 @@ export function HomeView({
                         className={`rounded-full px-3.5 py-1.5 text-xs font-medium border transition ${
                           timerMode === 'normal'
                             ? 'bg-white text-[#0A0A0C] border-white font-semibold'
-                            : 'bg-[#18181E] text-zinc-300 border-white/10 hover:border-white/25'
+                            : 'bg-white/[0.04] text-zinc-300 border-white/15 hover:border-white/35'
                         }`}
                       >
                         Normal Timer
@@ -1385,7 +1610,7 @@ export function HomeView({
 
                     {timerMode === 'pomodoro' && pomodoroPreset === 'custom' && (
                       <div className="flex items-center justify-center gap-2 text-xs text-zinc-300">
-                        <span className="text-zinc-500">Work</span>
+                        <span className="text-zinc-400">Work</span>
                         <input
                           type="number"
                           min={1}
@@ -1399,9 +1624,9 @@ export function HomeView({
                               ),
                             })
                           }
-                          className="w-14 rounded-lg border border-white/15 bg-[#0A0A0C] px-2 py-1 text-center font-mono text-white focus:outline-none"
+                          className="w-14 rounded-lg border border-white/15 bg-white/[0.07] px-2 py-1 text-center font-mono text-white focus:outline-none"
                         />
-                        <span className="text-zinc-500">: Break</span>
+                        <span className="text-zinc-400">: Break</span>
                         <input
                           type="number"
                           min={1}
@@ -1415,9 +1640,9 @@ export function HomeView({
                               ),
                             })
                           }
-                          className="w-14 rounded-lg border border-white/15 bg-[#0A0A0C] px-2 py-1 text-center font-mono text-white focus:outline-none"
+                          className="w-14 rounded-lg border border-white/15 bg-white/[0.07] px-2 py-1 text-center font-mono text-white focus:outline-none"
                         />
-                        <span className="text-zinc-500">min</span>
+                        <span className="text-zinc-400">min</span>
                       </div>
                     )}
                   </div>
