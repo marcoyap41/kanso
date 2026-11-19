@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, LayoutGroup, motion } from 'framer-motion';
 import {
   ArrowLeft,
   Calendar as CalendarIcon,
@@ -10,6 +11,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  CornerDownRight,
   GripVertical,
   Layers,
   Move,
@@ -30,6 +32,7 @@ import type {
   FocusSelection,
   FocusSession,
   Project,
+  Subtask,
   Task,
   TaskBoard,
   TimerMode,
@@ -46,11 +49,64 @@ interface CalendarViewProps {
 
 type CalendarMode = 'week' | 'day' | 'month';
 
+type CalendarDropPreview =
+  | { kind: 'timed'; dateKey: string; time: string }
+  | { kind: 'all-day'; dateKey: string }
+  | { kind: 'month'; dateKey: string }
+  | { kind: 'unschedule' };
+
+interface OptimisticSchedulePatch {
+  key: string;
+  scheduled_date: string | null;
+  scheduled_time: string | null;
+  scheduled_duration_minutes?: number | null;
+}
+
+const PREVIEW_ITEM_KEY = '__drag-preview__';
+const CALENDAR_SPRING = {
+  type: 'spring' as const,
+  stiffness: 520,
+  damping: 38,
+  mass: 0.8,
+};
+
 interface FlatTask {
   task: Task;
   project: Project;
   board: TaskBoard;
 }
+
+type CalendarItem =
+  | {
+      kind: 'task';
+      key: string;
+      id: number;
+      title: string;
+      completed: boolean;
+      time_spent_seconds: number;
+      scheduled_date?: string | null;
+      scheduled_time?: string | null;
+      scheduled_duration_minutes?: number | null;
+      task: Task;
+      subtask?: undefined;
+      project: Project;
+      board: TaskBoard;
+    }
+  | {
+      kind: 'subtask';
+      key: string;
+      id: number;
+      title: string;
+      completed: boolean;
+      time_spent_seconds: number;
+      scheduled_date?: string | null;
+      scheduled_time?: string | null;
+      scheduled_duration_minutes?: number | null;
+      task: Task;
+      subtask: Subtask;
+      project: Project;
+      board: TaskBoard;
+    };
 
 interface PositionedItem {
   id: string;
@@ -58,8 +114,8 @@ interface PositionedItem {
   endMin: number;
   lane: number;
   laneCount: number;
-  kind: 'task' | 'session';
-  flatTask?: FlatTask;
+  kind: 'planned' | 'session';
+  calendarItem?: CalendarItem;
   session?: FocusSession;
 }
 
@@ -132,6 +188,13 @@ function parseTimeToMinutes(timeStr: string): number {
   return (hh || 0) * 60 + (mm || 0);
 }
 
+function formatMinutesToTime(totalMins: number): string {
+  const clamped = Math.max(0, Math.min(1440, Math.round(totalMins)));
+  const hh = Math.floor(clamped / 60);
+  const mm = clamped % 60;
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+}
+
 function formatClockTime(dateIso: string): string {
   const d = new Date(dateIso);
   if (Number.isNaN(d.getTime())) return '--:--';
@@ -195,29 +258,29 @@ function formatPeriodHeading(mode: CalendarMode, anchorKey: string): string {
  * Assign side-by-side column lanes for overlapping timeline items on a given day.
  */
 function buildTimelineItemsForDay(
-  slottedTasks: FlatTask[],
+  slottedItems: CalendarItem[],
   sessions: FocusSession[]
 ): PositionedItem[] {
   const raw: Array<{
     id: string;
     startMin: number;
     endMin: number;
-    kind: 'task' | 'session';
-    flatTask?: FlatTask;
+    kind: 'planned' | 'session';
+    calendarItem?: CalendarItem;
     session?: FocusSession;
   }> = [];
 
-  for (const item of slottedTasks) {
-    if (!item.task.scheduled_time) continue;
-    const startMin = parseTimeToMinutes(item.task.scheduled_time);
-    const dur = item.task.scheduled_duration_minutes || 60;
+  for (const item of slottedItems) {
+    if (!item.scheduled_time) continue;
+    const startMin = parseTimeToMinutes(item.scheduled_time);
+    const dur = item.scheduled_duration_minutes || 60;
     const endMin = Math.min(1440, startMin + Math.max(15, dur));
     raw.push({
-      id: `task-${item.task.id}`,
+      id: item.key,
       startMin,
       endMin,
-      kind: 'task',
-      flatTask: item,
+      kind: 'planned',
+      calendarItem: item,
     });
   }
 
@@ -239,8 +302,16 @@ function buildTimelineItemsForDay(
 
   raw.sort((a, b) => {
     if (a.startMin !== b.startMin) return a.startMin - b.startMin;
-    if (a.kind !== b.kind) return a.kind === 'task' ? -1 : 1;
-    return b.endMin - a.endMin;
+    if (a.kind !== b.kind) return a.kind === 'planned' ? -1 : 1;
+    if (a.endMin !== b.endMin) return b.endMin - a.endMin;
+    if (
+      a.calendarItem &&
+      b.calendarItem &&
+      a.calendarItem.kind !== b.calendarItem.kind
+    ) {
+      return a.calendarItem.kind === 'task' ? -1 : 1;
+    }
+    return 0;
   });
 
   // Group into connected overlap clusters
@@ -319,25 +390,33 @@ export function CalendarView({
 
   // Drag-and-drop rescheduling mode state
   const [isDragMode, setIsDragMode] = useState(false);
-  const [draggingTaskId, setDraggingTaskId] = useState<number | null>(null);
-  const [dropHoverTarget, setDropHoverTarget] = useState<string | null>(null);
+  const [draggingItemKey, setDraggingItemKey] = useState<string | null>(null);
+  const [dragPreview, setDragPreview] = useState<CalendarDropPreview | null>(
+    null
+  );
+  const [optimisticPatch, setOptimisticPatch] =
+    useState<OptimisticSchedulePatch | null>(null);
+  const draggingItemKeyRef = useRef<string | null>(null);
+  const [unscheduledFilter, setUnscheduledFilter] = useState<
+    'all' | 'tasks' | 'subtasks'
+  >('all');
 
-  // Floating HUD task detail popover state (prevents truncation/clipping on cramped slots)
+  // Floating HUD task/subtask detail popover state (prevents truncation/clipping on cramped slots)
   const [hoveredCalendarItem, setHoveredCalendarItem] = useState<{
-    task: Task;
-    project: Project;
-    board: TaskBoard;
+    item: CalendarItem;
     rect: { top: number; left: number; bottom: number; width: number };
   } | null>(null);
 
   // Schedule modal state
   const [scheduleModalOpen, setScheduleModalOpen] = useState(false);
-  const [scheduleMode, setScheduleMode] = useState<'existing' | 'new'>(
-    'existing'
-  );
+  const [scheduleMode, setScheduleMode] = useState<
+    'existing' | 'new-task' | 'new-subtask'
+  >('existing');
   const [modalTaskId, setModalTaskId] = useState<string>('');
+  const [modalSubtaskId, setModalSubtaskId] = useState<string>('');
   const [modalProjectId, setModalProjectId] = useState<string>('');
   const [modalNewTaskTitle, setModalNewTaskTitle] = useState('');
+  const [modalNewSubtaskTitle, setModalNewSubtaskTitle] = useState('');
   const [modalDate, setModalDate] = useState(todayKey);
   const [modalTime, setModalTime] = useState('');
   const [modalDuration, setModalDuration] = useState<number | null>(null);
@@ -400,6 +479,72 @@ export function CalendarView({
     return list;
   }, [boards]);
 
+  const flatCalendarItems = useMemo<CalendarItem[]>(() => {
+    const list: CalendarItem[] = [];
+    for (const board of boards) {
+      for (const project of board.projects) {
+        for (const task of project.tasks) {
+          list.push({
+            kind: 'task',
+            key: `task-${task.id}`,
+            id: task.id,
+            title: task.title,
+            completed: task.completed,
+            time_spent_seconds: task.time_spent_seconds,
+            scheduled_date: task.scheduled_date,
+            scheduled_time: task.scheduled_time,
+            scheduled_duration_minutes: task.scheduled_duration_minutes,
+            task,
+            project,
+            board,
+          });
+          for (const sub of task.subtasks) {
+            list.push({
+              kind: 'subtask',
+              key: `subtask-${sub.id}`,
+              id: sub.id,
+              title: sub.title,
+              completed: sub.completed,
+              time_spent_seconds: sub.time_spent_seconds,
+              scheduled_date: sub.scheduled_date,
+              scheduled_time: sub.scheduled_time,
+              scheduled_duration_minutes: sub.scheduled_duration_minutes,
+              task,
+              subtask: sub,
+              project,
+              board,
+            });
+          }
+        }
+      }
+    }
+    return list;
+  }, [boards]);
+
+  const effectiveCalendarItems = useMemo<CalendarItem[]>(() => {
+    if (!optimisticPatch) return flatCalendarItems;
+    return flatCalendarItems.map((item) => {
+      if (item.key !== optimisticPatch.key) return item;
+      return {
+        ...item,
+        scheduled_date: optimisticPatch.scheduled_date,
+        scheduled_time: optimisticPatch.scheduled_time,
+        scheduled_duration_minutes:
+          optimisticPatch.scheduled_duration_minutes !== undefined
+            ? optimisticPatch.scheduled_duration_minutes
+            : item.scheduled_duration_minutes,
+      };
+    });
+  }, [flatCalendarItems, optimisticPatch]);
+
+  const draggedItem = useMemo<CalendarItem | null>(() => {
+    if (!draggingItemKey) return null;
+    return (
+      effectiveCalendarItems.find((item) => item.key === draggingItemKey) ||
+      null
+    );
+  }, [draggingItemKey, effectiveCalendarItems]);
+
   const allProjects = useMemo(() => {
     const list: Array<{ project: Project; board: TaskBoard }> = [];
     for (const board of boards) {
@@ -410,21 +555,34 @@ export function CalendarView({
     return list;
   }, [boards]);
 
-  const scheduledTasksByDate = useMemo(() => {
-    const map = new Map<string, FlatTask[]>();
-    for (const item of flatTasks) {
-      const date = item.task.scheduled_date;
+  const scheduledItemsByDate = useMemo(() => {
+    const map = new Map<string, CalendarItem[]>();
+    for (const item of effectiveCalendarItems) {
+      const date = item.scheduled_date;
       if (!date) continue;
       if (!map.has(date)) map.set(date, []);
       map.get(date)!.push(item);
     }
     return map;
-  }, [flatTasks]);
+  }, [effectiveCalendarItems]);
 
-  const unscheduledTasks = useMemo(
-    () => flatTasks.filter((f) => !f.task.scheduled_date && !f.task.completed),
-    [flatTasks]
+  const unscheduledItems = useMemo(
+    () =>
+      effectiveCalendarItems.filter(
+        (item) => !item.scheduled_date && !item.completed
+      ),
+    [effectiveCalendarItems]
   );
+
+  const filteredUnscheduledItems = useMemo(() => {
+    if (unscheduledFilter === 'tasks') {
+      return unscheduledItems.filter((item) => item.kind === 'task');
+    }
+    if (unscheduledFilter === 'subtasks') {
+      return unscheduledItems.filter((item) => item.kind === 'subtask');
+    }
+    return unscheduledItems;
+  }, [unscheduledItems, unscheduledFilter]);
 
   const sessionsByDate = useMemo(() => {
     const map = new Map<string, FocusSession[]>();
@@ -465,10 +623,10 @@ export function CalendarView({
       }
     }
 
-    for (const item of flatTasks) {
-      if (item.task.scheduled_date && visibleSet.has(item.task.scheduled_date)) {
+    for (const item of effectiveCalendarItems) {
+      if (item.scheduled_date && visibleSet.has(item.scheduled_date)) {
         scheduledTotal += 1;
-        if (item.task.completed) scheduledCompleted += 1;
+        if (item.completed) scheduledCompleted += 1;
       }
     }
 
@@ -478,19 +636,23 @@ export function CalendarView({
       scheduledTotal,
       scheduledCompleted,
     };
-  }, [visibleDateKeys, focusSessions, flatTasks, todayKey]);
+  }, [visibleDateKeys, focusSessions, effectiveCalendarItems, todayKey]);
 
   // Selected Day Inspector data
-  const selectedDayTasks = useMemo(() => {
-    const items = [...(scheduledTasksByDate.get(selectedDateKey) || [])];
+  const selectedDayItems = useMemo(() => {
+    const items = [...(scheduledItemsByDate.get(selectedDateKey) || [])];
     items.sort((a, b) => {
-      const ta = a.task.scheduled_time || '99:99';
-      const tb = b.task.scheduled_time || '99:99';
+      const ta = a.scheduled_time || '99:99';
+      const tb = b.scheduled_time || '99:99';
       if (ta !== tb) return ta.localeCompare(tb);
-      return Number(a.task.completed) - Number(b.task.completed);
+      if (a.completed !== b.completed) {
+        return Number(a.completed) - Number(b.completed);
+      }
+      if (a.kind !== b.kind) return a.kind === 'task' ? -1 : 1;
+      return 0;
     });
     return items;
-  }, [scheduledTasksByDate, selectedDateKey]);
+  }, [scheduledItemsByDate, selectedDateKey]);
 
   const selectedDaySessions = useMemo(() => {
     const list = [...(sessionsByDate.get(selectedDateKey) || [])];
@@ -530,13 +692,28 @@ export function CalendarView({
     [flatTasks, logTaskId]
   );
 
-  const editingTaskObj = useMemo(
-    () =>
-      scheduleMode === 'existing'
-        ? flatTasks.find((f) => String(f.task.id) === modalTaskId) || null
-        : null,
-    [flatTasks, modalTaskId, scheduleMode]
+  const selectedModalTaskObj = useMemo(
+    () => flatTasks.find((f) => String(f.task.id) === modalTaskId) || null,
+    [flatTasks, modalTaskId]
   );
+
+  const editingItemObj = useMemo<CalendarItem | null>(() => {
+    if (scheduleMode !== 'existing' || !modalTaskId) return null;
+    if (modalSubtaskId) {
+      return (
+        effectiveCalendarItems.find(
+          (item) =>
+            item.kind === 'subtask' &&
+            String(item.subtask.id) === modalSubtaskId
+        ) || null
+      );
+    }
+    return (
+      effectiveCalendarItems.find(
+        (item) => item.kind === 'task' && String(item.task.id) === modalTaskId
+      ) || null
+    );
+  }, [effectiveCalendarItems, modalTaskId, modalSubtaskId, scheduleMode]);
 
   function stepPeriod(dir: -1 | 1) {
     if (viewMode === 'day') {
@@ -572,31 +749,41 @@ export function CalendarView({
   function openScheduleModal(opts?: {
     dateKey?: string;
     time?: string;
-    task?: Task;
+    item?: CalendarItem;
   }) {
     setError(null);
     setHoveredCalendarItem(null);
     const targetDate = opts?.dateKey || selectedDateKey || todayKey;
     setModalDate(targetDate);
 
-    if (opts?.task) {
+    if (opts?.item) {
       setScheduleMode('existing');
-      setModalTaskId(String(opts.task.id));
-      setModalTime(opts.time ?? opts.task.scheduled_time ?? '');
-      setModalDuration(opts.task.scheduled_duration_minutes ?? null);
+      setModalTaskId(String(opts.item.task.id));
+      setModalSubtaskId(
+        opts.item.kind === 'subtask' ? String(opts.item.subtask.id) : ''
+      );
+      setModalTime(opts.time ?? opts.item.scheduled_time ?? '');
+      setModalDuration(opts.item.scheduled_duration_minutes ?? null);
     } else {
-      const preferred = unscheduledTasks[0] || flatTasks[0] || null;
+      const preferred = unscheduledItems[0] || flatCalendarItems[0] || null;
       if (preferred) {
         setScheduleMode('existing');
         setModalTaskId(String(preferred.task.id));
+        setModalSubtaskId(
+          preferred.kind === 'subtask' ? String(preferred.subtask.id) : ''
+        );
       } else if (allProjects[0]) {
-        setScheduleMode('new');
+        setScheduleMode('new-task');
         setModalProjectId(String(allProjects[0].project.id));
         setModalTaskId('');
+        setModalSubtaskId('');
+      } else {
+        setModalTaskId('');
+        setModalSubtaskId('');
       }
       setModalTime(opts?.time ?? '');
       setModalDuration(
-        preferred ? (preferred.task.scheduled_duration_minutes ?? null) : null
+        preferred ? (preferred.scheduled_duration_minutes ?? null) : null
       );
     }
 
@@ -604,6 +791,7 @@ export function CalendarView({
       setModalProjectId(String(allProjects[0].project.id));
     }
     setModalNewTaskTitle('');
+    setModalNewSubtaskTitle('');
     setScheduleModalOpen(true);
   }
 
@@ -637,15 +825,47 @@ export function CalendarView({
     }
   }
 
-  async function handleToggleTaskDone(task: Task) {
+  async function updateItemSchedule(
+    item: CalendarItem,
+    payload: {
+      scheduled_date?: string | null;
+      scheduled_time?: string | null;
+      scheduled_duration_minutes?: number | null;
+    }
+  ) {
+    if (item.kind === 'task') {
+      await api.updateTask(item.id, payload);
+    } else {
+      await api.updateSubtask(item.id, payload);
+    }
+  }
+
+  function startWorkForItem(item: CalendarItem) {
+    onStartWork({
+      boardId: item.board.id,
+      projectId: item.project.id,
+      taskId: item.task.id,
+      subtaskId: item.kind === 'subtask' ? item.subtask.id : null,
+    });
+  }
+
+  async function handleToggleItemDone(item: CalendarItem) {
     await runAction(async () => {
-      const nextCompleted = !task.completed;
-      await api.updateTask(task.id, { completed: nextCompleted });
-      const subs = task.subtasks.filter((s) => s.completed !== nextCompleted);
-      if (subs.length > 0) {
-        await Promise.all(
-          subs.map((s) => api.updateSubtask(s.id, { completed: nextCompleted }))
+      if (item.kind === 'task') {
+        const nextCompleted = !item.task.completed;
+        await api.updateTask(item.task.id, { completed: nextCompleted });
+        const subs = item.task.subtasks.filter(
+          (s) => s.completed !== nextCompleted
         );
+        if (subs.length > 0) {
+          await Promise.all(
+            subs.map((s) => api.updateSubtask(s.id, { completed: nextCompleted }))
+          );
+        }
+      } else {
+        await api.updateSubtask(item.subtask.id, {
+          completed: !item.subtask.completed,
+        });
       }
     });
   }
@@ -655,7 +875,7 @@ export function CalendarView({
     if (!modalDate) return;
 
     await runAction(async () => {
-      if (scheduleMode === 'new') {
+      if (scheduleMode === 'new-task') {
         const pid = Number(modalProjectId);
         const title = modalNewTaskTitle.trim();
         if (!pid || !title) {
@@ -668,25 +888,43 @@ export function CalendarView({
           scheduled_time: modalTime || null,
           scheduled_duration_minutes: modalDuration,
         });
-      } else {
+      } else if (scheduleMode === 'new-subtask') {
         const tid = Number(modalTaskId);
-        if (!tid) {
-          throw new Error('Please choose a task to schedule.');
+        const title = modalNewSubtaskTitle.trim();
+        if (!tid || !title) {
+          throw new Error('Select a parent task and enter a subtask title.');
         }
-        await api.updateTask(tid, {
+        await api.createSubtask({
+          task_id: tid,
+          title,
           scheduled_date: modalDate,
           scheduled_time: modalTime || null,
           scheduled_duration_minutes: modalDuration,
         });
+      } else {
+        const tid = Number(modalTaskId);
+        if (!tid) {
+          throw new Error('Please choose a task or subtask to schedule.');
+        }
+        const payload = {
+          scheduled_date: modalDate,
+          scheduled_time: modalTime || null,
+          scheduled_duration_minutes: modalDuration,
+        };
+        if (modalSubtaskId) {
+          await api.updateSubtask(Number(modalSubtaskId), payload);
+        } else {
+          await api.updateTask(tid, payload);
+        }
       }
       setSelectedDateKey(modalDate);
       setScheduleModalOpen(false);
     });
   }
 
-  async function handleUnscheduleTask(taskId: number) {
+  async function handleUnscheduleItem(item: CalendarItem) {
     await runAction(async () => {
-      await api.updateTask(taskId, {
+      await updateItemSchedule(item, {
         scheduled_date: null,
         scheduled_time: null,
         scheduled_duration_minutes: null,
@@ -724,16 +962,14 @@ export function CalendarView({
     });
   }
 
-  function showTaskHoverCard(
+  function showItemHoverCard(
     e: React.MouseEvent<HTMLElement>,
-    item: FlatTask
+    item: CalendarItem
   ) {
-    if (draggingTaskId !== null) return;
+    if (draggingItemKey !== null) return;
     const r = e.currentTarget.getBoundingClientRect();
     setHoveredCalendarItem({
-      task: item.task,
-      project: item.project,
-      board: item.board,
+      item,
       rect: {
         top: r.top,
         left: r.left,
@@ -743,31 +979,69 @@ export function CalendarView({
     });
   }
 
-  function hideTaskHoverCard() {
+  function hideItemHoverCard() {
     setHoveredCalendarItem(null);
   }
 
-  function handleTaskDragStart(e: React.DragEvent, task: Task) {
-    if (!isDragMode) return;
-    e.stopPropagation();
-    setHoveredCalendarItem(null);
-    e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', String(task.id));
-    window.requestAnimationFrame(() => {
-      setDraggingTaskId(task.id);
+  function clearCalendarDrag() {
+    draggingItemKeyRef.current = null;
+    setDraggingItemKey(null);
+    setDragPreview(null);
+  }
+
+  function setDragPreviewIfChanged(next: CalendarDropPreview | null) {
+    setDragPreview((prev) => {
+      if (prev === null && next === null) return prev;
+      if (prev && next && prev.kind === next.kind) {
+        if (prev.kind === 'unschedule' && next.kind === 'unschedule') {
+          return prev;
+        }
+        if (
+          (prev.kind === 'month' && next.kind === 'month') ||
+          (prev.kind === 'all-day' && next.kind === 'all-day')
+        ) {
+          if (prev.dateKey === next.dateKey) return prev;
+        }
+        if (
+          prev.kind === 'timed' &&
+          next.kind === 'timed' &&
+          prev.dateKey === next.dateKey &&
+          prev.time === next.time
+        ) {
+          return prev;
+        }
+      }
+      return next;
     });
   }
 
-  function handleTaskDragEnd() {
-    setDraggingTaskId(null);
-    setDropHoverTarget(null);
+  function handleItemDragStart(e: React.DragEvent, item: CalendarItem) {
+    if (!isDragMode || busy) {
+      e.preventDefault();
+      return;
+    }
+    e.stopPropagation();
+    setHoveredCalendarItem(null);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', item.key);
+    draggingItemKeyRef.current = item.key;
+    setDragPreview(null);
+    window.requestAnimationFrame(() => {
+      setDraggingItemKey(item.key);
+    });
   }
 
-  function getDraggedTask(e: React.DragEvent): Task | null {
-    const rawId = e.dataTransfer.getData('text/plain');
-    const targetId = rawId ? Number(rawId) : draggingTaskId;
-    if (!targetId) return null;
-    return flatTasks.find((f) => f.task.id === targetId)?.task || null;
+  function handleItemDragEnd() {
+    clearCalendarDrag();
+  }
+
+  function getDraggedItem(e: React.DragEvent): CalendarItem | null {
+    const rawKey = e.dataTransfer.getData('text/plain');
+    const targetKey = rawKey || draggingItemKeyRef.current || draggingItemKey;
+    if (!targetKey) return null;
+    return (
+      effectiveCalendarItems.find((item) => item.key === targetKey) || null
+    );
   }
 
   async function handleDropOnDate(
@@ -778,10 +1052,9 @@ export function CalendarView({
   ) {
     e.preventDefault();
     e.stopPropagation();
-    const task = getDraggedTask(e);
-    setDraggingTaskId(null);
-    setDropHoverTarget(null);
-    if (!task) return;
+    const item = getDraggedItem(e);
+    clearCalendarDrag();
+    if (!item) return;
 
     const nextDate = dateKey;
     const nextTime =
@@ -789,39 +1062,57 @@ export function CalendarView({
         ? null
         : mode === 'timed'
           ? timeStr || null
-          : task.scheduled_time || null;
+          : item.scheduled_time || null;
 
     if (
-      task.scheduled_date === nextDate &&
-      (task.scheduled_time || null) === nextTime
+      item.scheduled_date === nextDate &&
+      (item.scheduled_time || null) === nextTime
     ) {
       return;
     }
 
-    await runAction(async () => {
-      await api.updateTask(task.id, {
-        scheduled_date: nextDate,
-        scheduled_time: nextTime,
-      });
-      setSelectedDateKey(nextDate);
+    setOptimisticPatch({
+      key: item.key,
+      scheduled_date: nextDate,
+      scheduled_time: nextTime,
     });
+    try {
+      await runAction(async () => {
+        await updateItemSchedule(item, {
+          scheduled_date: nextDate,
+          scheduled_time: nextTime,
+        });
+        setSelectedDateKey(nextDate);
+      });
+    } finally {
+      setOptimisticPatch(null);
+    }
   }
 
   async function handleDropToUnschedule(e: React.DragEvent) {
     e.preventDefault();
     e.stopPropagation();
-    const task = getDraggedTask(e);
-    setDraggingTaskId(null);
-    setDropHoverTarget(null);
-    if (!task || !task.scheduled_date) return;
+    const item = getDraggedItem(e);
+    clearCalendarDrag();
+    if (!item || !item.scheduled_date) return;
 
-    await runAction(async () => {
-      await api.updateTask(task.id, {
-        scheduled_date: null,
-        scheduled_time: null,
-        scheduled_duration_minutes: null,
-      });
+    setOptimisticPatch({
+      key: item.key,
+      scheduled_date: null,
+      scheduled_time: null,
+      scheduled_duration_minutes: null,
     });
+    try {
+      await runAction(async () => {
+        await updateItemSchedule(item, {
+          scheduled_date: null,
+          scheduled_time: null,
+          scheduled_duration_minutes: null,
+        });
+      });
+    } finally {
+      setOptimisticPatch(null);
+    }
   }
 
   const timelineDays =
@@ -829,6 +1120,11 @@ export function CalendarView({
   const maxBoardDaySeconds = Math.max(
     1,
     ...selectedDayBoardBreakdown.map((b) => b.seconds)
+  );
+  const isUnscheduleDropHover =
+    isDragMode && dragPreview?.kind === 'unschedule';
+  const showUnscheduleProjection = Boolean(
+    draggedItem && draggedItem.scheduled_date && isUnscheduleDropHover
   );
 
   return (
@@ -986,8 +1282,7 @@ export function CalendarView({
               type="button"
               onClick={() => {
                 setIsDragMode((prev) => !prev);
-                setDraggingTaskId(null);
-                setDropHoverTarget(null);
+                clearCalendarDrag();
               }}
               title="Toggle drag-and-drop rescheduling mode"
               className={`inline-flex items-center gap-1.5 rounded-full border px-3.5 py-2 text-xs font-semibold transition shrink-0 ${
@@ -1006,7 +1301,7 @@ export function CalendarView({
               className="inline-flex items-center gap-1.5 rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 px-3.5 py-2 text-xs font-semibold shadow-[0_0_24px_rgba(255,255,255,0.14)] transition shrink-0"
             >
               <CalendarPlus className="w-3.5 h-3.5 shrink-0" />
-              <span>Schedule Task</span>
+              <span>Schedule</span>
             </button>
 
             <button
@@ -1064,8 +1359,8 @@ export function CalendarView({
                   const d = parseLocalDateKey(dateKey);
                   const isToday = dateKey === todayKey;
                   const isSelected = dateKey === selectedDateKey;
-                  const dayTasks = showPlanned
-                    ? scheduledTasksByDate.get(dateKey) || []
+                  const dayItems = showPlanned
+                    ? scheduledItemsByDate.get(dateKey) || []
                     : [];
                   const daySessions = showSessions
                     ? sessionsByDate.get(dateKey) || []
@@ -1075,9 +1370,20 @@ export function CalendarView({
                     0
                   );
 
-                  const monthTargetId = `month-${dateKey}`;
                   const isMonthDropHover =
-                    isDragMode && dropHoverTarget === monthTargetId;
+                    isDragMode &&
+                    dragPreview?.kind === 'month' &&
+                    dragPreview.dateKey === dateKey;
+                  const showMonthProjection = Boolean(
+                    draggedItem &&
+                      isMonthDropHover &&
+                      draggedItem.scheduled_date !== dateKey
+                  );
+                  const maxMonthItems = showMonthProjection
+                    ? 5
+                    : isDragMode
+                      ? 6
+                      : 3;
 
                   return (
                     <div
@@ -1089,9 +1395,10 @@ export function CalendarView({
                           ? (e) => {
                               e.preventDefault();
                               e.dataTransfer.dropEffect = 'move';
-                              if (dropHoverTarget !== monthTargetId) {
-                                setDropHoverTarget(monthTargetId);
-                              }
+                              setDragPreviewIfChanged({
+                                kind: 'month',
+                                dateKey,
+                              });
                             }
                           : undefined
                       }
@@ -1105,8 +1412,11 @@ export function CalendarView({
                               ) {
                                 return;
                               }
-                              setDropHoverTarget((prev) =>
-                                prev === monthTargetId ? null : prev
+                              setDragPreview((prev) =>
+                                prev?.kind === 'month' &&
+                                prev.dateKey === dateKey
+                                  ? null
+                                  : prev
                               );
                             }
                           : undefined
@@ -1125,7 +1435,7 @@ export function CalendarView({
                       }}
                       className={`group min-h-[102px] sm:min-h-[118px] rounded-2xl border p-2 text-left flex flex-col justify-between transition cursor-pointer ${
                         isMonthDropHover
-                          ? '!border-sky-400/80 !bg-sky-500/10 ring-1 ring-sky-400/40'
+                          ? 'border-sky-400/50 bg-sky-500/[0.06]'
                           : isSelected
                             ? 'border-white/40 bg-[#15151C]'
                             : inMonth
@@ -1167,51 +1477,97 @@ export function CalendarView({
                       </div>
 
                       <div className="mt-1.5 space-y-1 overflow-hidden">
-                        {dayTasks
-                          .slice(0, isDragMode ? 6 : 3)
-                          .map(({ task, project, board }) => (
-                            <div
-                              key={task.id}
-                              draggable={isDragMode}
-                              onDragStart={(e) => handleTaskDragStart(e, task)}
-                              onDragEnd={handleTaskDragEnd}
-                              onMouseEnter={(e) =>
-                                showTaskHoverCard(e, { task, project, board })
-                              }
-                              onMouseLeave={hideTaskHoverCard}
-                              className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] truncate bg-white/[0.05] border border-white/[0.08] ${
-                                isDragMode
-                                  ? 'cursor-grab active:cursor-grabbing hover:border-sky-400/50'
-                                  : ''
-                              } ${draggingTaskId === task.id ? 'opacity-45' : ''}`}
-                            >
-                              {isDragMode && (
-                                <GripVertical className="w-2.5 h-2.5 text-zinc-500 shrink-0" />
-                              )}
-                              <span
-                                className="h-1.5 w-1.5 rounded-full shrink-0"
-                                style={{
-                                  backgroundColor: board.color,
-                                  boxShadow: `0 0 6px ${board.color}60`,
-                                }}
-                              />
-                              <span
-                                className={`truncate ${
-                                  task.completed
-                                    ? 'line-through text-zinc-500'
-                                    : 'text-zinc-200'
-                                }`}
+                        <LayoutGroup id={`month-${dateKey}`}>
+                          <AnimatePresence initial={false}>
+                            {showMonthProjection && draggedItem && (
+                              <motion.div
+                                key={PREVIEW_ITEM_KEY}
+                                layout="position"
+                                initial={{ opacity: 0, y: -4, scale: 0.95 }}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                exit={{ opacity: 0, y: -4, scale: 0.95 }}
+                                transition={CALENDAR_SPRING}
+                                className="pointer-events-none flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] truncate border border-dashed border-sky-400/80 bg-sky-500/[0.14] shadow-[0_0_16px_rgba(56,189,248,0.2)]"
                               >
-                                {task.scheduled_time
-                                  ? `${task.scheduled_time} `
-                                  : ''}
-                                {task.title}
-                              </span>
-                            </div>
-                          ))}
-                        {dayTasks.length > (isDragMode ? 6 : 3) && (
+                                <span
+                                  className="h-1.5 w-1.5 rounded-full shrink-0"
+                                  style={{
+                                    backgroundColor: draggedItem.board.color,
+                                    boxShadow: `0 0 6px ${draggedItem.board.color}80`,
+                                  }}
+                                />
+                                {draggedItem.kind === 'subtask' && (
+                                  <CornerDownRight className="w-2.5 h-2.5 text-sky-300 shrink-0" />
+                                )}
+                                <span className="truncate text-sky-100 font-medium">
+                                  {draggedItem.scheduled_time
+                                    ? `${draggedItem.scheduled_time} `
+                                    : ''}
+                                  {draggedItem.title}
+                                </span>
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
+                          {dayItems
+                            .slice(0, maxMonthItems)
+                            .map((item) => (
+                              <motion.div
+                                key={item.key}
+                                layout="position"
+                                transition={CALENDAR_SPRING}
+                              >
+                                <div
+                                  draggable={isDragMode}
+                                  onDragStart={(e) => handleItemDragStart(e, item)}
+                                  onDragEnd={handleItemDragEnd}
+                                  onMouseEnter={(e) => showItemHoverCard(e, item)}
+                                  onMouseLeave={hideItemHoverCard}
+                                  className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] truncate bg-white/[0.05] border ${
+                                    item.kind === 'subtask'
+                                      ? 'border-dashed border-white/[0.14]'
+                                      : 'border-white/[0.08]'
+                                  } ${
+                                    isDragMode
+                                      ? 'cursor-grab active:cursor-grabbing hover:border-sky-400/50'
+                                      : ''
+                                  } ${
+                                    draggingItemKey === item.key
+                                      ? 'opacity-25 !border-dashed border-white/25 pointer-events-none'
+                                      : ''
+                                  }`}
+                                >
+                                  {isDragMode && (
+                                    <GripVertical className="w-2.5 h-2.5 text-zinc-500 shrink-0" />
+                                  )}
+                                  <span
+                                    className="h-1.5 w-1.5 rounded-full shrink-0"
+                                    style={{
+                                      backgroundColor: item.board.color,
+                                      boxShadow: `0 0 6px ${item.board.color}60`,
+                                    }}
+                                  />
+                                  {item.kind === 'subtask' && (
+                                    <CornerDownRight className="w-2.5 h-2.5 text-zinc-400 shrink-0" />
+                                  )}
+                                  <span
+                                    className={`truncate ${
+                                      item.completed
+                                        ? 'line-through text-zinc-500'
+                                        : 'text-zinc-200'
+                                    }`}
+                                  >
+                                    {item.scheduled_time
+                                      ? `${item.scheduled_time} `
+                                      : ''}
+                                    {item.title}
+                                  </span>
+                                </div>
+                              </motion.div>
+                            ))}
+                        </LayoutGroup>
+                        {dayItems.length > maxMonthItems && (
                           <p className="text-[9px] font-mono text-zinc-500 px-1">
-                            +{dayTasks.length - (isDragMode ? 6 : 3)} more
+                            +{dayItems.length - maxMonthItems} more
                           </p>
                         )}
                       </div>
@@ -1246,17 +1602,26 @@ export function CalendarView({
                       const d = parseLocalDateKey(dayKey);
                       const isToday = dayKey === todayKey;
                       const isSelected = dayKey === selectedDateKey;
-                      const dayTasks = scheduledTasksByDate.get(dayKey) || [];
-                      const allDayTasks = showPlanned
-                        ? dayTasks.filter((item) => !item.task.scheduled_time)
+                      const dayItems = scheduledItemsByDate.get(dayKey) || [];
+                      const allDayItems = showPlanned
+                        ? dayItems.filter((item) => !item.scheduled_time)
                         : [];
                       const dayFocusSecs = (
                         sessionsByDate.get(dayKey) || []
                       ).reduce((s, x) => s + (x.duration_seconds || 0), 0);
 
-                      const allDayTargetId = `allday-${dayKey}`;
                       const isAllDayDropHover =
-                        isDragMode && dropHoverTarget === allDayTargetId;
+                        isDragMode &&
+                        dragPreview?.kind === 'all-day' &&
+                        dragPreview.dateKey === dayKey;
+                      const showAllDayProjection = Boolean(
+                        draggedItem &&
+                          isAllDayDropHover &&
+                          !(
+                            draggedItem.scheduled_date === dayKey &&
+                            !draggedItem.scheduled_time
+                          )
+                      );
 
                       return (
                         <div
@@ -1267,9 +1632,10 @@ export function CalendarView({
                               ? (e) => {
                                   e.preventDefault();
                                   e.dataTransfer.dropEffect = 'move';
-                                  if (dropHoverTarget !== allDayTargetId) {
-                                    setDropHoverTarget(allDayTargetId);
-                                  }
+                                  setDragPreviewIfChanged({
+                                    kind: 'all-day',
+                                    dateKey: dayKey,
+                                  });
                                 }
                               : undefined
                           }
@@ -1283,8 +1649,11 @@ export function CalendarView({
                                   ) {
                                     return;
                                   }
-                                  setDropHoverTarget((prev) =>
-                                    prev === allDayTargetId ? null : prev
+                                  setDragPreview((prev) =>
+                                    prev?.kind === 'all-day' &&
+                                    prev.dateKey === dayKey
+                                      ? null
+                                      : prev
                                   );
                                 }
                               : undefined
@@ -1297,7 +1666,7 @@ export function CalendarView({
                           }
                           className={`border-r last:border-r-0 border-white/[0.06] p-2.5 cursor-pointer transition ${
                             isAllDayDropHover
-                              ? '!bg-sky-500/15 ring-1 ring-inset ring-sky-400/50'
+                              ? 'bg-sky-500/[0.06] ring-1 ring-inset ring-sky-400/40'
                               : isSelected
                                 ? 'bg-white/[0.05]'
                                 : 'hover:bg-white/[0.02]'
@@ -1330,93 +1699,137 @@ export function CalendarView({
                             )}
                           </div>
 
-                          {/* All-day / unslotted tasks */}
-                          {allDayTasks.length > 0 && (
-                            <div className="space-y-1 mt-1.5">
-                              {allDayTasks.map(({ task, project, board }) => (
-                                <div
-                                  key={task.id}
-                                  draggable={isDragMode}
-                                  onDragStart={(e) =>
-                                    handleTaskDragStart(e, task)
-                                  }
-                                  onDragEnd={handleTaskDragEnd}
-                                  onMouseEnter={(e) =>
-                                    showTaskHoverCard(e, {
-                                      task,
-                                      project,
-                                      board,
-                                    })
-                                  }
-                                  onMouseLeave={hideTaskHoverCard}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    openScheduleModal({
-                                      dateKey: dayKey,
-                                      task,
-                                    });
-                                  }}
-                                  className={`group/allday flex items-center gap-1.5 rounded-lg border border-white/15 bg-[#0A0A0C] hover:border-white/35 hover:bg-[#13131A] px-2 py-1 text-[11px] transition ${
-                                    isDragMode
-                                      ? 'cursor-grab active:cursor-grabbing hover:border-sky-400/50'
-                                      : ''
-                                  } ${draggingTaskId === task.id ? 'opacity-45' : ''}`}
-                                >
-                                  {isDragMode && (
-                                    <GripVertical className="w-3 h-3 text-zinc-500 shrink-0" />
+                          {/* All-day / unslotted tasks & subtasks */}
+                          {(allDayItems.length > 0 || showAllDayProjection) && (
+                            <LayoutGroup id={`allday-${dayKey}`}>
+                              <div className="space-y-1 mt-1.5">
+                                <AnimatePresence initial={false}>
+                                  {showAllDayProjection && draggedItem && (
+                                    <motion.div
+                                      key={PREVIEW_ITEM_KEY}
+                                      layout="position"
+                                      initial={{ opacity: 0, y: -4, scale: 0.96 }}
+                                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                                      exit={{ opacity: 0, y: -4, scale: 0.96 }}
+                                      transition={CALENDAR_SPRING}
+                                      className="pointer-events-none flex items-center gap-1.5 rounded-lg border border-dashed border-sky-400/80 bg-sky-500/[0.14] shadow-[0_0_18px_rgba(56,189,248,0.2)] px-2 py-1 text-[11px]"
+                                    >
+                                      <span
+                                        className="h-1.5 w-1.5 rounded-full shrink-0"
+                                        style={{
+                                          backgroundColor:
+                                            draggedItem.board.color,
+                                          boxShadow: `0 0 6px ${draggedItem.board.color}80`,
+                                        }}
+                                      />
+                                      {draggedItem.kind === 'subtask' && (
+                                        <CornerDownRight className="w-2.5 h-2.5 text-sky-300 shrink-0" />
+                                      )}
+                                      <span className="flex-1 min-w-0 truncate text-sky-100 font-medium">
+                                        {draggedItem.title}
+                                      </span>
+                                      <span className="shrink-0 rounded bg-sky-400/20 px-1 py-0.5 text-[9px] font-mono text-sky-200">
+                                        All day
+                                      </span>
+                                    </motion.div>
                                   )}
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      void handleToggleTaskDone(task);
-                                    }}
-                                    aria-label={`Toggle ${task.title}`}
-                                    className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border transition ${
-                                      task.completed
-                                        ? 'border-emerald-400 bg-emerald-400 text-[#0A0A0C]'
-                                        : 'border-white/30 hover:border-white'
-                                    }`}
+                                </AnimatePresence>
+                                {allDayItems.map((item) => (
+                                  <motion.div
+                                    key={item.key}
+                                    layout="position"
+                                    transition={CALENDAR_SPRING}
                                   >
-                                    {task.completed && (
-                                      <Check className="w-2.5 h-2.5 stroke-[3]" />
-                                    )}
-                                  </button>
-                                  <span
-                                    className="h-1.5 w-1.5 rounded-full shrink-0"
-                                    style={{
-                                      backgroundColor: board.color,
-                                      boxShadow: `0 0 6px ${board.color}60`,
-                                    }}
-                                  />
-                                  <span
-                                    className={`flex-1 min-w-0 truncate ${
-                                      task.completed
-                                        ? 'line-through text-zinc-500'
-                                        : 'text-zinc-200'
-                                    }`}
-                                  >
-                                    {task.title}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      onStartWork({
-                                        boardId: board.id,
-                                        projectId: project.id,
-                                        taskId: task.id,
-                                        subtaskId: null,
-                                      });
-                                    }}
-                                    title="Focus on this task"
-                                    className="opacity-60 group-hover/allday:opacity-100 rounded-full p-0.5 text-zinc-300 hover:text-white shrink-0"
-                                  >
-                                    <Play className="w-2.5 h-2.5 fill-current" />
-                                  </button>
-                                </div>
-                              ))}
-                            </div>
+                                    <div
+                                      draggable={isDragMode}
+                                      onDragStart={(e) =>
+                                        handleItemDragStart(e, item)
+                                      }
+                                      onDragEnd={handleItemDragEnd}
+                                      onMouseEnter={(e) =>
+                                        showItemHoverCard(e, item)
+                                      }
+                                      onMouseLeave={hideItemHoverCard}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        openScheduleModal({
+                                          dateKey: dayKey,
+                                          item,
+                                        });
+                                      }}
+                                      className={`group/allday flex items-center gap-1.5 rounded-lg border bg-[#0A0A0C] hover:border-white/35 hover:bg-[#13131A] px-2 py-1 text-[11px] transition ${
+                                        item.kind === 'subtask'
+                                          ? 'border-dashed border-white/20'
+                                          : 'border-white/15'
+                                      } ${
+                                        isDragMode
+                                          ? 'cursor-grab active:cursor-grabbing hover:border-sky-400/50'
+                                          : ''
+                                      } ${
+                                        draggingItemKey === item.key
+                                          ? 'opacity-25 !border-dashed border-white/25 pointer-events-none'
+                                          : ''
+                                      }`}
+                                    >
+                                      {isDragMode && (
+                                        <GripVertical className="w-3 h-3 text-zinc-500 shrink-0" />
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          void handleToggleItemDone(item);
+                                        }}
+                                        aria-label={`Toggle ${item.title}`}
+                                        className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border transition ${
+                                          item.completed
+                                            ? 'border-emerald-400 bg-emerald-400 text-[#0A0A0C]'
+                                            : 'border-white/30 hover:border-white'
+                                        }`}
+                                      >
+                                        {item.completed && (
+                                          <Check className="w-2.5 h-2.5 stroke-[3]" />
+                                        )}
+                                      </button>
+                                      <span
+                                        className="h-1.5 w-1.5 rounded-full shrink-0"
+                                        style={{
+                                          backgroundColor: item.board.color,
+                                          boxShadow: `0 0 6px ${item.board.color}60`,
+                                        }}
+                                      />
+                                      {item.kind === 'subtask' && (
+                                        <CornerDownRight className="w-2.5 h-2.5 text-zinc-400 shrink-0" />
+                                      )}
+                                      <span
+                                        className={`flex-1 min-w-0 truncate ${
+                                          item.completed
+                                            ? 'line-through text-zinc-500'
+                                            : 'text-zinc-200'
+                                        }`}
+                                      >
+                                        {item.title}
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          startWorkForItem(item);
+                                        }}
+                                        title={
+                                          item.kind === 'subtask'
+                                            ? 'Focus on this subtask'
+                                            : 'Focus on this task'
+                                        }
+                                        className="opacity-60 group-hover/allday:opacity-100 rounded-full p-0.5 text-zinc-300 hover:text-white shrink-0"
+                                      >
+                                        <Play className="w-2.5 h-2.5 fill-current" />
+                                      </button>
+                                    </div>
+                                  </motion.div>
+                                ))}
+                              </div>
+                            </LayoutGroup>
                           )}
                         </div>
                       );
@@ -1426,7 +1839,7 @@ export function CalendarView({
                   {/* Scrollable 24-Hour Grid (starts scrolled to 06:00) */}
                   <div
                     ref={timelineScrollRef}
-                    onScroll={hideTaskHoverCard}
+                    onScroll={hideItemHoverCard}
                     className="h-[580px] overflow-y-auto relative bg-[#0A0A0C]"
                   >
                     <div
@@ -1455,22 +1868,91 @@ export function CalendarView({
                       {timelineDays.map((dayKey) => {
                         const isToday = dayKey === todayKey;
                         const isSelected = dayKey === selectedDateKey;
-                        const slottedTasks = showPlanned
-                          ? (scheduledTasksByDate.get(dayKey) || []).filter(
-                              (item) => Boolean(item.task.scheduled_time)
+                        const slottedItems = showPlanned
+                          ? (scheduledItemsByDate.get(dayKey) || []).filter(
+                              (item) => Boolean(item.scheduled_time)
                             )
                           : [];
                         const daySessions = showSessions
                           ? sessionsByDate.get(dayKey) || []
                           : [];
+                        const baselinePositioned =
+                          draggedItem &&
+                          dragPreview &&
+                          slottedItems.some((i) => i.key === draggedItem.key)
+                            ? buildTimelineItemsForDay(slottedItems, daySessions)
+                            : null;
+                        const layoutSlottedItems =
+                          draggedItem && dragPreview
+                            ? [
+                                ...slottedItems.filter(
+                                  (i) => i.key !== draggedItem.key
+                                ),
+                                ...(dragPreview.kind === 'timed' &&
+                                dragPreview.dateKey === dayKey
+                                  ? [
+                                      {
+                                        ...draggedItem,
+                                        key: PREVIEW_ITEM_KEY,
+                                        scheduled_date: dayKey,
+                                        scheduled_time: dragPreview.time,
+                                      },
+                                    ]
+                                  : []),
+                              ]
+                            : slottedItems;
                         const positioned = buildTimelineItemsForDay(
-                          slottedTasks,
+                          layoutSlottedItems,
                           daySessions
+                        );
+                        const baselineByItemKey = new Map(
+                          (baselinePositioned || [])
+                            .filter(
+                              (e) => e.kind === 'planned' && e.calendarItem
+                            )
+                            .map((e) => [e.calendarItem!.key, e])
+                        );
+                        const layoutByItemKey = new Map(
+                          positioned
+                            .filter(
+                              (e) =>
+                                e.kind === 'planned' &&
+                                e.calendarItem &&
+                                e.calendarItem.key !== PREVIEW_ITEM_KEY
+                            )
+                            .map((e) => [e.calendarItem!.key, e])
+                        );
+                        const previewEntry = positioned.find(
+                          (e) =>
+                            e.kind === 'planned' &&
+                            e.calendarItem?.key === PREVIEW_ITEM_KEY
+                        );
+                        const sessionEntries = positioned.filter(
+                          (e) => e.kind === 'session' && e.session
                         );
 
                         return (
                           <div
                             key={dayKey}
+                            onDragLeave={
+                              isDragMode
+                                ? (e) => {
+                                    if (
+                                      e.currentTarget.contains(
+                                        e.relatedTarget as Node
+                                      )
+                                    ) {
+                                      return;
+                                    }
+                                    setDragPreview((prev) =>
+                                      prev?.kind === 'timed' &&
+                                      prev.dateKey === dayKey
+                                        ? null
+                                        : prev
+                                    );
+                                  }
+                                : undefined
+                            }
                             className={`relative border-r last:border-r-0 border-white/[0.06] ${
                               isSelected ? 'bg-white/[0.02]' : ''
                             }`}
@@ -1478,17 +1960,12 @@ export function CalendarView({
                             {/* Hour Slots (click empty slot to schedule, or drop task in Drag Mode) */}
                             {HOURS.map((hour) => {
                               const hh = String(hour).padStart(2, '0');
-                              const slot00 = `slot-${dayKey}-${hh}:00`;
-                              const slot30 = `slot-${dayKey}-${hh}:30`;
-                              const isHover00 =
-                                isDragMode && dropHoverTarget === slot00;
-                              const isHover30 =
-                                isDragMode && dropHoverTarget === slot30;
-                              const hoveredSlotTime = isHover00
-                                ? `${hh}:00`
-                                : isHover30
-                                  ? `${hh}:30`
-                                  : null;
+                              const isHourHovered =
+                                isDragMode &&
+                                dragPreview?.kind === 'timed' &&
+                                dragPreview.dateKey === dayKey &&
+                                (dragPreview.time === `${hh}:00` ||
+                                  dragPreview.time === `${hh}:30`);
 
                               const getSnappedTime = (e: React.DragEvent) => {
                                 const rect =
@@ -1516,29 +1993,11 @@ export function CalendarView({
                                       ? (e) => {
                                           e.preventDefault();
                                           e.dataTransfer.dropEffect = 'move';
-                                          const snapped = getSnappedTime(e);
-                                          const targetId = `slot-${dayKey}-${snapped}`;
-                                          if (dropHoverTarget !== targetId) {
-                                            setDropHoverTarget(targetId);
-                                          }
-                                        }
-                                      : undefined
-                                  }
-                                  onDragLeave={
-                                    isDragMode
-                                      ? (e) => {
-                                          if (
-                                            e.currentTarget.contains(
-                                              e.relatedTarget as Node
-                                            )
-                                          ) {
-                                            return;
-                                          }
-                                          setDropHoverTarget((prev) =>
-                                            prev === slot00 || prev === slot30
-                                              ? null
-                                              : prev
-                                          );
+                                          setDragPreviewIfChanged({
+                                            kind: 'timed',
+                                            dateKey: dayKey,
+                                            time: getSnappedTime(e),
+                                          });
                                         }
                                       : undefined
                                   }
@@ -1557,24 +2016,11 @@ export function CalendarView({
                                   }
                                   title={`Click to schedule at ${formatHourGutter(hour)}`}
                                   className={`relative border-b border-white/[0.04] transition-colors cursor-crosshair ${
-                                    hoveredSlotTime
-                                      ? '!bg-sky-500/15 !border-sky-400/50'
+                                    isHourHovered
+                                      ? '!bg-sky-500/[0.06]'
                                       : 'hover:bg-white/[0.035]'
                                   }`}
-                                >
-                                  {hoveredSlotTime && (
-                                    <div
-                                      className={`pointer-events-none absolute inset-x-1 z-30 flex items-center gap-1.5 ${
-                                        isHover30 ? 'top-1/2' : 'top-1'
-                                      }`}
-                                    >
-                                      <span className="h-[1.5px] flex-1 bg-sky-400/80 shadow-[0_0_8px_rgba(56,189,248,0.8)]" />
-                                      <span className="rounded bg-sky-500 px-1.5 py-0.5 text-[9px] font-mono font-semibold text-[#0A0A0C]">
-                                        {hoveredSlotTime}
-                                      </span>
-                                    </div>
-                                  )}
-                                </div>
+                                />
                               );
                             })}
 
@@ -1591,8 +2037,18 @@ export function CalendarView({
                               </div>
                             )}
 
-                            {/* Scheduled Tasks & Focus Sessions */}
-                            {positioned.map((entry) => {
+                            {/* Scheduled Tasks */}
+                            {slottedItems.map((item) => {
+                              const isDragOrigin = Boolean(
+                                draggedItem &&
+                                  dragPreview &&
+                                  item.key === draggedItem.key
+                              );
+                              const entry = isDragOrigin
+                                ? baselineByItemKey.get(item.key)
+                                : layoutByItemKey.get(item.key);
+                              if (!entry) return null;
+
                               const topPx = (entry.startMin / 60) * HOUR_HEIGHT;
                               const rawHeightPx =
                                 ((entry.endMin - entry.startMin) / 60) *
@@ -1600,183 +2056,285 @@ export function CalendarView({
                               const heightPx = Math.max(26, rawHeightPx - 2);
                               const widthPct = 100 / entry.laneCount;
                               const leftPct = entry.lane * widthPct;
+                              const isOriginSameSlot = Boolean(
+                                isDragOrigin &&
+                                  dragPreview?.kind === 'timed' &&
+                                  dragPreview.dateKey === dayKey &&
+                                  dragPreview.time === item.scheduled_time
+                              );
 
-                              if (entry.kind === 'task' && entry.flatTask) {
-                                const { task, project, board } = entry.flatTask;
-                                return (
-                                  <div
-                                    key={entry.id}
-                                    draggable={isDragMode}
-                                    onDragStart={(e) =>
-                                      handleTaskDragStart(e, task)
-                                    }
-                                    onDragEnd={handleTaskDragEnd}
-                                    onMouseEnter={(e) =>
-                                      showTaskHoverCard(e, {
-                                        task,
-                                        project,
-                                        board,
-                                      })
-                                    }
-                                    onMouseLeave={hideTaskHoverCard}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setSelectedDateKey(dayKey);
-                                      openScheduleModal({
-                                        dateKey: dayKey,
-                                        task,
-                                      });
-                                    }}
-                                    style={{
-                                      top: `${topPx + 1}px`,
-                                      height: `${heightPx}px`,
-                                      left: `calc(${leftPct}% + 3px)`,
-                                      width: `calc(${widthPct}% - 6px)`,
-                                      borderLeftColor: board.color,
-                                    }}
-                                    className={`group/blk absolute z-20 rounded-xl border border-white/15 border-l-4 overflow-hidden backdrop-blur-md transition ${
-                                      entry.laneCount > 1
-                                        ? 'px-1.5 py-1'
-                                        : 'px-2 py-1'
-                                    } ${
-                                      draggingTaskId !== null
-                                        ? 'pointer-events-none'
-                                        : isDragMode
-                                          ? 'cursor-grab active:cursor-grabbing hover:border-sky-400/60 hover:bg-[#191922]'
-                                          : 'cursor-pointer hover:bg-[#191922]'
-                                    } ${
-                                      draggingTaskId === task.id
-                                        ? '!opacity-45'
-                                        : task.completed
+                              return (
+                                <div
+                                  key={item.key}
+                                  draggable={isDragMode}
+                                  onDragStart={(e) =>
+                                    handleItemDragStart(e, item)
+                                  }
+                                  onDragEnd={handleItemDragEnd}
+                                  onMouseEnter={(e) =>
+                                    showItemHoverCard(e, item)
+                                  }
+                                  onMouseLeave={hideItemHoverCard}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedDateKey(dayKey);
+                                    openScheduleModal({
+                                      dateKey: dayKey,
+                                      item,
+                                    });
+                                  }}
+                                  style={{
+                                    top: `${topPx + 1}px`,
+                                    height: `${heightPx}px`,
+                                    left: `calc(${leftPct}% + 3px)`,
+                                    width: `calc(${widthPct}% - 6px)`,
+                                    borderLeftColor: item.board.color,
+                                    borderLeftStyle: 'solid',
+                                  }}
+                                  className={`group/blk absolute rounded-xl border border-l-4 overflow-hidden backdrop-blur-md transition-[top,left,width,height,opacity,background-color,border-color] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+                                    isDragOrigin ? 'z-0' : 'z-20'
+                                  } ${
+                                    item.kind === 'subtask'
+                                      ? 'border-dashed border-white/20'
+                                      : 'border-white/15'
+                                  } ${
+                                    entry.laneCount > 1
+                                      ? 'px-1.5 py-1'
+                                      : 'px-2 py-1'
+                                  } ${
+                                    draggingItemKey !== null || isDragOrigin
+                                      ? 'pointer-events-none'
+                                      : isDragMode
+                                        ? 'cursor-grab active:cursor-grabbing hover:border-sky-400/60 hover:bg-[#191922]'
+                                        : 'cursor-pointer hover:bg-[#191922]'
+                                  } ${
+                                    isDragOrigin
+                                      ? isOriginSameSlot
+                                        ? 'opacity-0'
+                                        : 'opacity-20 !border-dashed !border-white/25 !bg-white/[0.02] !shadow-none'
+                                      : draggingItemKey === item.key
+                                        ? 'opacity-25 !border-dashed border-white/25 bg-[#121216]/75'
+                                        : item.completed
                                           ? 'bg-[#121216]/75 opacity-65'
                                           : 'bg-[#16161D]/95 hover:border-white/40 shadow-[0_6px_20px_rgba(0,0,0,0.45)]'
-                                    }`}
-                                  >
-                                    <div className="flex items-start justify-between gap-1">
-                                      <div className="flex items-center gap-1.5 min-w-0">
-                                        <button
-                                          type="button"
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            void handleToggleTaskDone(task);
-                                          }}
-                                          aria-label={`Toggle ${task.title}`}
-                                          className={`mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border transition ${
-                                            task.completed
-                                              ? 'border-emerald-400 bg-emerald-400 text-[#0A0A0C]'
-                                              : 'border-white/30 hover:border-white'
-                                          }`}
-                                        >
-                                          {task.completed && (
-                                            <Check className="w-2.5 h-2.5 stroke-[3]" />
-                                          )}
-                                        </button>
-                                        <span
-                                          className={`text-[11px] font-semibold truncate ${
-                                            task.completed
-                                              ? 'line-through text-zinc-500'
-                                              : 'text-white'
-                                          }`}
-                                        >
-                                          {task.title}
-                                        </span>
-                                      </div>
-
+                                  }`}
+                                >
+                                  <div className="flex items-start justify-between gap-1">
+                                    <div className="flex items-center gap-1.5 min-w-0">
                                       <button
                                         type="button"
                                         onClick={(e) => {
                                           e.stopPropagation();
-                                          onStartWork({
-                                            boardId: board.id,
-                                            projectId: project.id,
-                                            taskId: task.id,
-                                            subtaskId: null,
-                                          });
+                                          void handleToggleItemDone(item);
                                         }}
-                                        title="Start focusing on this task"
-                                        className="opacity-0 group-hover/blk:opacity-100 rounded-full bg-white text-[#0A0A0C] p-1 hover:bg-zinc-200 transition shrink-0"
+                                        aria-label={`Toggle ${item.title}`}
+                                        className={`mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border transition ${
+                                          item.completed
+                                            ? 'border-emerald-400 bg-emerald-400 text-[#0A0A0C]'
+                                            : 'border-white/30 hover:border-white'
+                                        }`}
                                       >
-                                        <Play className="w-2.5 h-2.5 fill-current" />
-                                      </button>
-                                    </div>
-
-                                    {heightPx >= 42 && (
-                                      <p className="mt-0.5 pl-5 text-[10px] font-mono text-zinc-400 truncate">
-                                        {task.scheduled_time}
-                                        {task.scheduled_duration_minutes
-                                          ? ` · ${task.scheduled_duration_minutes}m`
-                                          : ''}
-                                        {project.name ? ` · ${project.name}` : ''}
-                                      </p>
-                                    )}
-                                  </div>
-                                );
-                              }
-
-                              if (entry.kind === 'session' && entry.session) {
-                                const sess = entry.session;
-                                const accent = sess.board_color || '#34D399';
-                                const label = sess.subtask_title
-                                  ? `${sess.task_title} › ${sess.subtask_title}`
-                                  : sess.task_title;
-
-                                return (
-                                  <div
-                                    key={entry.id}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setSelectedDateKey(dayKey);
-                                    }}
-                                    style={{
-                                      top: `${topPx + 1}px`,
-                                      height: `${heightPx}px`,
-                                      left: `calc(${leftPct}% + 3px)`,
-                                      width: `calc(${widthPct}% - 6px)`,
-                                      backgroundColor: `${accent}1E`,
-                                      borderColor: `${accent}70`,
-                                    }}
-                                    title={`${label} (${formatLoggedDuration(sess.duration_seconds)})`}
-                                    className={`absolute z-10 rounded-xl border px-2 py-1 overflow-hidden cursor-pointer backdrop-blur-md transition hover:brightness-110 ${
-                                      draggingTaskId !== null
-                                        ? 'pointer-events-none'
-                                        : ''
-                                    }`}
-                                  >
-                                    <div className="flex items-center justify-between gap-1">
-                                      <div className="flex items-center gap-1 min-w-0">
-                                        <span
-                                          className="h-1.5 w-1.5 rounded-full shrink-0"
-                                          style={{
-                                            backgroundColor: accent,
-                                            boxShadow: `0 0 6px ${accent}60`,
-                                          }}
-                                        />
-                                        <span className="text-[11px] font-medium text-white truncate">
-                                          {label}
-                                        </span>
-                                      </div>
-                                      <span className="text-[9px] font-mono text-zinc-200 shrink-0">
-                                        {formatLoggedDuration(
-                                          sess.duration_seconds
+                                        {item.completed && (
+                                          <Check className="w-2.5 h-2.5 stroke-[3]" />
                                         )}
+                                      </button>
+                                      {item.kind === 'subtask' && (
+                                        <CornerDownRight className="w-3 h-3 text-zinc-400 shrink-0" />
+                                      )}
+                                      <span
+                                        className={`text-[11px] font-semibold truncate ${
+                                          item.completed
+                                            ? 'line-through text-zinc-500'
+                                            : 'text-white'
+                                        }`}
+                                      >
+                                        {item.title}
                                       </span>
                                     </div>
 
-                                    {heightPx >= 42 && (
-                                      <p className="mt-0.5 text-[10px] font-mono text-zinc-300/80 truncate">
-                                        <span className="capitalize">
-                                          {sess.mode}
-                                        </span>{' '}
-                                        · {formatClockTime(sess.started_at)}–
-                                        {formatClockTime(sess.ended_at)}
-                                      </p>
-                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        startWorkForItem(item);
+                                      }}
+                                      title={
+                                        item.kind === 'subtask'
+                                          ? 'Start focusing on this subtask'
+                                          : 'Start focusing on this task'
+                                      }
+                                      className="opacity-0 group-hover/blk:opacity-100 rounded-full bg-white text-[#0A0A0C] p-1 hover:bg-zinc-200 transition shrink-0"
+                                    >
+                                      <Play className="w-2.5 h-2.5 fill-current" />
+                                    </button>
                                   </div>
-                                );
-                              }
 
-                              return null;
+                                  {heightPx >= 42 && (
+                                    <p className="mt-0.5 pl-5 text-[10px] font-mono text-zinc-400 truncate">
+                                      {item.scheduled_time}
+                                      {item.scheduled_duration_minutes
+                                        ? ` · ${item.scheduled_duration_minutes}m`
+                                        : ''}
+                                      {item.kind === 'subtask'
+                                        ? ` · ${item.task.title}`
+                                        : item.project.name
+                                          ? ` · ${item.project.name}`
+                                          : ''}
+                                    </p>
+                                  )}
+                                </div>
+                              );
                             })}
+
+                            {/* Focus Sessions */}
+                            {sessionEntries.map((entry) => {
+                              const sess = entry.session!;
+                              const topPx = (entry.startMin / 60) * HOUR_HEIGHT;
+                              const rawHeightPx =
+                                ((entry.endMin - entry.startMin) / 60) *
+                                HOUR_HEIGHT;
+                              const heightPx = Math.max(26, rawHeightPx - 2);
+                              const widthPct = 100 / entry.laneCount;
+                              const leftPct = entry.lane * widthPct;
+                              const accent = sess.board_color || '#34D399';
+                              const label = sess.subtask_title
+                                ? `${sess.task_title} › ${sess.subtask_title}`
+                                : sess.task_title;
+
+                              return (
+                                <div
+                                  key={entry.id}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedDateKey(dayKey);
+                                  }}
+                                  style={{
+                                    top: `${topPx + 1}px`,
+                                    height: `${heightPx}px`,
+                                    left: `calc(${leftPct}% + 3px)`,
+                                    width: `calc(${widthPct}% - 6px)`,
+                                    backgroundColor: `${accent}1E`,
+                                    borderColor: `${accent}70`,
+                                  }}
+                                  title={`${label} (${formatLoggedDuration(sess.duration_seconds)})`}
+                                  className={`absolute z-10 rounded-xl border px-2 py-1 overflow-hidden cursor-pointer backdrop-blur-md transition-[top,left,width,height,opacity,filter] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] hover:brightness-110 ${
+                                    draggingItemKey !== null
+                                      ? 'pointer-events-none'
+                                      : ''
+                                  }`}
+                                >
+                                  <div className="flex items-center justify-between gap-1">
+                                    <div className="flex items-center gap-1 min-w-0">
+                                      <span
+                                        className="h-1.5 w-1.5 rounded-full shrink-0"
+                                        style={{
+                                          backgroundColor: accent,
+                                          boxShadow: `0 0 6px ${accent}60`,
+                                        }}
+                                      />
+                                      <span className="text-[11px] font-medium text-white truncate">
+                                        {label}
+                                      </span>
+                                    </div>
+                                    <span className="text-[9px] font-mono text-zinc-200 shrink-0">
+                                      {formatLoggedDuration(
+                                        sess.duration_seconds
+                                      )}
+                                    </span>
+                                  </div>
+
+                                  {heightPx >= 42 && (
+                                    <p className="mt-0.5 text-[10px] font-mono text-zinc-300/80 truncate">
+                                      <span className="capitalize">
+                                        {sess.mode}
+                                      </span>{' '}
+                                      · {formatClockTime(sess.started_at)}–
+                                      {formatClockTime(sess.ended_at)}
+                                    </p>
+                                  )}
+                                </div>
+                              );
+                            })}
+
+                            {/* Live Post-Drop Timeline Projection */}
+                            <AnimatePresence initial={false}>
+                              {previewEntry &&
+                                draggedItem &&
+                                (() => {
+                                  const topPx =
+                                    (previewEntry.startMin / 60) * HOUR_HEIGHT;
+                                  const rawHeightPx =
+                                    ((previewEntry.endMin -
+                                      previewEntry.startMin) /
+                                      60) *
+                                    HOUR_HEIGHT;
+                                  const heightPx = Math.max(
+                                    26,
+                                    rawHeightPx - 2
+                                  );
+                                  const widthPct = 100 / previewEntry.laneCount;
+                                  const leftPct = previewEntry.lane * widthPct;
+                                  const startTimeLabel = formatMinutesToTime(
+                                    previewEntry.startMin
+                                  );
+                                  const endTimeLabel = formatMinutesToTime(
+                                    previewEntry.endMin
+                                  );
+
+                                  return (
+                                    <motion.div
+                                      key={PREVIEW_ITEM_KEY}
+                                      initial={{ opacity: 0, scale: 0.96 }}
+                                      animate={{ opacity: 1, scale: 1 }}
+                                      exit={{ opacity: 0, scale: 0.96 }}
+                                      transition={{ duration: 0.14 }}
+                                      style={{
+                                        top: `${topPx + 1}px`,
+                                        height: `${heightPx}px`,
+                                        left: `calc(${leftPct}% + 3px)`,
+                                        width: `calc(${widthPct}% - 6px)`,
+                                        borderLeftColor:
+                                          draggedItem.board.color,
+                                        borderLeftStyle: 'solid',
+                                      }}
+                                      className={`pointer-events-none absolute z-30 rounded-xl border border-dashed border-sky-400/80 border-l-4 bg-sky-500/[0.14] backdrop-blur-md shadow-[0_0_28px_rgba(56,189,248,0.24)] overflow-hidden transition-[top,left,width,height] duration-150 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+                                        previewEntry.laneCount > 1
+                                          ? 'px-1.5 py-1'
+                                          : 'px-2 py-1'
+                                      }`}
+                                    >
+                                      <div className="flex items-start justify-between gap-1">
+                                        <div className="flex items-center gap-1 min-w-0">
+                                          {draggedItem.kind === 'subtask' && (
+                                            <CornerDownRight className="w-3 h-3 text-sky-300 shrink-0" />
+                                          )}
+                                          <span className="text-[11px] font-semibold text-sky-100 truncate">
+                                            {draggedItem.title}
+                                          </span>
+                                        </div>
+                                        <span className="shrink-0 rounded bg-sky-400/20 px-1 py-0.5 text-[9px] font-mono text-sky-200">
+                                          {previewEntry.laneCount > 2
+                                            ? startTimeLabel
+                                            : `${startTimeLabel}–${endTimeLabel}`}
+                                        </span>
+                                      </div>
+
+                                      {heightPx >= 42 && (
+                                        <p className="mt-0.5 text-[10px] font-mono text-sky-200/80 truncate">
+                                          {previewEntry.endMin -
+                                            previewEntry.startMin}
+                                          m
+                                          {draggedItem.kind === 'subtask'
+                                            ? ` · ${draggedItem.task.title}`
+                                            : draggedItem.project.name
+                                              ? ` · ${draggedItem.project.name}`
+                                              : ''}
+                                        </p>
+                                      )}
+                                    </motion.div>
+                                  );
+                                })()}
+                            </AnimatePresence>
                           </div>
                         );
                       })}
@@ -1880,11 +2438,11 @@ export function CalendarView({
               )}
             </div>
 
-            {/* Scheduled Tasks on Selected Date */}
+            {/* Scheduled Tasks & Subtasks on Selected Date */}
             <div className="mt-5">
               <div className="flex items-center justify-between mb-2.5">
                 <h3 className="text-xs font-semibold text-zinc-300">
-                  Scheduled Tasks ({selectedDayTasks.length})
+                  Scheduled ({selectedDayItems.length})
                 </h3>
                 <button
                   type="button"
@@ -1897,23 +2455,32 @@ export function CalendarView({
                 </button>
               </div>
 
-              {selectedDayTasks.length === 0 ? (
+              {selectedDayItems.length === 0 ? (
                 <p className="rounded-xl border border-dashed border-white/15 py-4 px-3 text-center text-xs text-zinc-500">
-                  No tasks scheduled for {formatShortDateLabel(selectedDateKey)}.
+                  No tasks or subtasks scheduled for{' '}
+                  {formatShortDateLabel(selectedDateKey)}.
                 </p>
               ) : (
                 <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
-                  {selectedDayTasks.map(({ task, project, board }) => (
+                  {selectedDayItems.map((item) => (
                     <div
-                      key={task.id}
+                      key={item.key}
                       draggable={isDragMode}
-                      onDragStart={(e) => handleTaskDragStart(e, task)}
-                      onDragEnd={handleTaskDragEnd}
-                      className={`group flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-[#0B0B0F] hover:border-white/25 px-3 py-2 transition ${
+                      onDragStart={(e) => handleItemDragStart(e, item)}
+                      onDragEnd={handleItemDragEnd}
+                      className={`group flex items-center justify-between gap-2 rounded-xl border bg-[#0B0B0F] hover:border-white/25 px-3 py-2 transition ${
+                        item.kind === 'subtask'
+                          ? 'border-dashed border-white/15'
+                          : 'border-white/10'
+                      } ${
                         isDragMode
                           ? 'cursor-grab active:cursor-grabbing hover:border-sky-400/50'
                           : ''
-                      } ${draggingTaskId === task.id ? 'opacity-45' : ''}`}
+                      } ${
+                        draggingItemKey === item.key
+                          ? 'opacity-25 !border-dashed border-white/25'
+                          : ''
+                      }`}
                     >
                       <div className="flex items-center gap-2 min-w-0">
                         {isDragMode && (
@@ -1921,14 +2488,14 @@ export function CalendarView({
                         )}
                         <button
                           type="button"
-                          onClick={() => void handleToggleTaskDone(task)}
+                          onClick={() => void handleToggleItemDone(item)}
                           className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition ${
-                            task.completed
+                            item.completed
                               ? 'border-emerald-400 bg-emerald-400 text-[#0A0A0C]'
                               : 'border-white/30 hover:border-white'
                           }`}
                         >
-                          {task.completed && (
+                          {item.completed && (
                             <Check className="w-3 h-3 stroke-[3]" />
                           )}
                         </button>
@@ -1937,35 +2504,42 @@ export function CalendarView({
                           onClick={() =>
                             openScheduleModal({
                               dateKey: selectedDateKey,
-                              task,
+                              item,
                             })
                           }
                           className="min-w-0 text-left"
                         >
-                          <p
-                            className={`text-xs font-medium truncate ${
-                              task.completed
-                                ? 'line-through text-zinc-500'
-                                : 'text-zinc-100'
-                            }`}
-                          >
-                            {task.title}
-                          </p>
+                          <div className="flex items-center gap-1 min-w-0">
+                            {item.kind === 'subtask' && (
+                              <CornerDownRight className="w-3 h-3 text-zinc-400 shrink-0" />
+                            )}
+                            <p
+                              className={`text-xs font-medium truncate ${
+                                item.completed
+                                  ? 'line-through text-zinc-500'
+                                  : 'text-zinc-100'
+                              }`}
+                            >
+                              {item.title}
+                            </p>
+                          </div>
                           <p className="text-[10px] text-zinc-500 truncate">
                             <span
                               className="inline-block h-1.5 w-1.5 rounded-full mr-1 align-middle"
-                              style={{ backgroundColor: board.color }}
+                              style={{ backgroundColor: item.board.color }}
                             />
-                            {project.name}
-                            {task.scheduled_time
-                              ? ` · ${task.scheduled_time}${
-                                  task.scheduled_duration_minutes
-                                    ? ` (${task.scheduled_duration_minutes}m)`
+                            {item.kind === 'subtask'
+                              ? `${item.project.name} › ${item.task.title}`
+                              : item.project.name}
+                            {item.scheduled_time
+                              ? ` · ${item.scheduled_time}${
+                                  item.scheduled_duration_minutes
+                                    ? ` (${item.scheduled_duration_minutes}m)`
                                     : ''
                                 }`
                               : ` · All day${
-                                  task.scheduled_duration_minutes
-                                    ? ` (${task.scheduled_duration_minutes}m)`
+                                  item.scheduled_duration_minutes
+                                    ? ` (${item.scheduled_duration_minutes}m)`
                                     : ''
                                 }`}
                           </p>
@@ -1974,14 +2548,7 @@ export function CalendarView({
 
                       <button
                         type="button"
-                        onClick={() =>
-                          onStartWork({
-                            boardId: board.id,
-                            projectId: project.id,
-                            taskId: task.id,
-                            subtaskId: null,
-                          })
-                        }
+                        onClick={() => startWorkForItem(item)}
                         title="Start focus timer"
                         className="rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 p-1.5 transition shrink-0"
                       >
@@ -2068,16 +2635,14 @@ export function CalendarView({
             </div>
           </div>
 
-          {/* Panel 2: Unscheduled Tasks Backlog */}
+          {/* Panel 2: Unscheduled Tasks & Subtasks Backlog */}
           <div
             onDragOver={
               isDragMode
                 ? (e) => {
                     e.preventDefault();
                     e.dataTransfer.dropEffect = 'move';
-                    if (dropHoverTarget !== 'unschedule') {
-                      setDropHoverTarget('unschedule');
-                    }
+                    setDragPreviewIfChanged({ kind: 'unschedule' });
                   }
                 : undefined
             }
@@ -2087,8 +2652,8 @@ export function CalendarView({
                     if (e.currentTarget.contains(e.relatedTarget as Node)) {
                       return;
                     }
-                    setDropHoverTarget((prev) =>
-                      prev === 'unschedule' ? null : prev
+                    setDragPreview((prev) =>
+                      prev?.kind === 'unschedule' ? null : prev
                     );
                   }
                 : undefined
@@ -2097,25 +2662,42 @@ export function CalendarView({
               isDragMode ? (e) => void handleDropToUnschedule(e) : undefined
             }
             className={`rounded-3xl border bg-[#121216]/90 backdrop-blur-xl p-5 shadow-[0_20px_60px_rgba(0,0,0,0.55)] transition ${
-              isDragMode && dropHoverTarget === 'unschedule'
-                ? 'border-sky-400/75 bg-sky-500/[0.08] ring-1 ring-sky-400/35'
+              isUnscheduleDropHover
+                ? 'border-sky-400/55 bg-sky-500/[0.06] ring-1 ring-sky-400/30'
                 : 'border-white/15'
             }`}
           >
             <div className="flex items-center justify-between gap-2 mb-3">
               <div>
-                <h3 className="text-sm font-bold text-white">
-                  Unscheduled Tasks
-                </h3>
+                <h3 className="text-sm font-bold text-white">Unscheduled</h3>
                 <p className="text-[11px] text-zinc-500">
-                  Assign open tasks directly onto{' '}
+                  Assign open tasks &amp; subtasks onto{' '}
                   {formatShortDateLabel(selectedDateKey)}
                 </p>
               </div>
               <span className="rounded-full border border-white/15 bg-white/[0.04] px-2.5 py-0.5 text-[11px] font-mono text-zinc-400">
-                {unscheduledTasks.length}
+                {unscheduledItems.length}
               </span>
             </div>
+
+            {unscheduledItems.length > 0 && (
+              <div className="grid grid-cols-3 gap-1 rounded-full border border-white/10 bg-[#0A0A0C] p-0.5 mb-3">
+                {(['all', 'tasks', 'subtasks'] as const).map((filterKey) => (
+                  <button
+                    key={filterKey}
+                    type="button"
+                    onClick={() => setUnscheduledFilter(filterKey)}
+                    className={`rounded-full py-1 text-[11px] font-medium capitalize transition ${
+                      unscheduledFilter === filterKey
+                        ? 'bg-white text-[#0A0A0C] font-semibold'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {filterKey}
+                  </button>
+                ))}
+              </div>
+            )}
 
             {boards.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-white/15 p-5 text-center">
@@ -2131,65 +2713,132 @@ export function CalendarView({
                   Open Task Management
                 </button>
               </div>
-            ) : unscheduledTasks.length === 0 ? (
+            ) : !showUnscheduleProjection && unscheduledItems.length === 0 ? (
               <p className="rounded-xl border border-dashed border-white/15 py-5 px-3 text-center text-xs text-zinc-500">
-                All active tasks are scheduled!
+                All active tasks &amp; subtasks are scheduled!
+              </p>
+            ) : !showUnscheduleProjection &&
+              filteredUnscheduledItems.length === 0 ? (
+              <p className="rounded-xl border border-dashed border-white/15 py-5 px-3 text-center text-xs text-zinc-500">
+                No unscheduled {unscheduledFilter}.
               </p>
             ) : (
-              <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-                {unscheduledTasks.slice(0, 20).map(({ task, project, board }) => (
-                  <div
-                    key={task.id}
-                    draggable={isDragMode}
-                    onDragStart={(e) => handleTaskDragStart(e, task)}
-                    onDragEnd={handleTaskDragEnd}
-                    className={`flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-[#0B0B0F] hover:border-white/25 px-3 py-2 transition ${
-                      isDragMode
-                        ? 'cursor-grab active:cursor-grabbing hover:border-sky-400/50'
-                        : ''
-                    } ${draggingTaskId === task.id ? 'opacity-45' : ''}`}
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      {isDragMode && (
-                        <GripVertical className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-                      )}
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <span
-                            className="h-2 w-2 rounded-full shrink-0"
-                            style={{ backgroundColor: board.color }}
-                          />
-                          <p className="text-xs font-medium text-zinc-200 truncate">
-                            {task.title}
-                          </p>
+              <LayoutGroup id="calendar-unscheduled">
+                <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                  <AnimatePresence initial={false}>
+                    {showUnscheduleProjection && draggedItem && (
+                      <motion.div
+                        key={PREVIEW_ITEM_KEY}
+                        layout="position"
+                        initial={{ opacity: 0, y: -6, scale: 0.96 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: -6, scale: 0.96 }}
+                        transition={CALENDAR_SPRING}
+                        className="pointer-events-none flex items-center justify-between gap-2 rounded-xl border border-dashed border-sky-400/80 bg-sky-500/[0.14] shadow-[0_0_20px_rgba(56,189,248,0.2)] px-3 py-2"
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className="h-2 w-2 rounded-full shrink-0"
+                                style={{
+                                  backgroundColor: draggedItem.board.color,
+                                  boxShadow: `0 0 6px ${draggedItem.board.color}80`,
+                                }}
+                              />
+                              {draggedItem.kind === 'subtask' && (
+                                <CornerDownRight className="w-3 h-3 text-sky-300 shrink-0" />
+                              )}
+                              <p className="text-xs font-medium text-sky-100 truncate">
+                                {draggedItem.title}
+                              </p>
+                            </div>
+                            <p className="text-[10px] text-sky-200/75 truncate pl-3.5">
+                              {draggedItem.kind === 'subtask'
+                                ? `${draggedItem.board.name} / ${draggedItem.project.name} › ${draggedItem.task.title}`
+                                : `${draggedItem.board.name} / ${draggedItem.project.name}`}
+                            </p>
+                          </div>
                         </div>
-                        <p className="text-[10px] text-zinc-500 truncate pl-3.5">
-                          {board.name} / {project.name}
-                        </p>
-                      </div>
-                    </div>
 
-                    <button
-                      type="button"
-                      onClick={() =>
-                        openScheduleModal({
-                          dateKey: selectedDateKey,
-                          task,
-                        })
-                      }
-                      className="rounded-full border border-white/15 bg-white/[0.05] hover:bg-white hover:text-[#0A0A0C] px-3 py-1 text-xs font-medium text-zinc-200 transition shrink-0"
+                        <span className="shrink-0 rounded-full border border-sky-400/40 bg-sky-400/20 px-2.5 py-0.5 text-[10px] font-medium text-sky-200">
+                          Drop to unschedule
+                        </span>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                  {filteredUnscheduledItems.slice(0, 50).map((item) => (
+                    <motion.div
+                      key={item.key}
+                      layout="position"
+                      transition={CALENDAR_SPRING}
                     >
-                      Schedule
-                    </button>
-                  </div>
-                ))}
-              </div>
+                      <div
+                        draggable={isDragMode}
+                        onDragStart={(e) => handleItemDragStart(e, item)}
+                        onDragEnd={handleItemDragEnd}
+                        className={`flex items-center justify-between gap-2 rounded-xl border bg-[#0B0B0F] hover:border-white/25 px-3 py-2 transition ${
+                          item.kind === 'subtask'
+                            ? 'border-dashed border-white/15'
+                            : 'border-white/10'
+                        } ${
+                          isDragMode
+                            ? 'cursor-grab active:cursor-grabbing hover:border-sky-400/50'
+                            : ''
+                        } ${
+                          draggingItemKey === item.key
+                            ? 'opacity-25 !border-dashed border-white/25 pointer-events-none'
+                            : ''
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          {isDragMode && (
+                            <GripVertical className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                          )}
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className="h-2 w-2 rounded-full shrink-0"
+                                style={{ backgroundColor: item.board.color }}
+                              />
+                              {item.kind === 'subtask' && (
+                                <CornerDownRight className="w-3 h-3 text-zinc-400 shrink-0" />
+                              )}
+                              <p className="text-xs font-medium text-zinc-200 truncate">
+                                {item.title}
+                              </p>
+                            </div>
+                            <p className="text-[10px] text-zinc-500 truncate pl-3.5">
+                              {item.kind === 'subtask'
+                                ? `${item.board.name} / ${item.project.name} › ${item.task.title}`
+                                : `${item.board.name} / ${item.project.name}`}
+                            </p>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            openScheduleModal({
+                              dateKey: selectedDateKey,
+                              item,
+                            })
+                          }
+                          className="rounded-full border border-white/15 bg-white/[0.05] hover:bg-white hover:text-[#0A0A0C] px-3 py-1 text-xs font-medium text-zinc-200 transition shrink-0"
+                        >
+                          Schedule
+                        </button>
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+              </LayoutGroup>
             )}
           </div>
         </aside>
       </div>
 
-      {/* Modal: Schedule Task (Existing or New) */}
+      {/* Modal: Schedule Task or Subtask */}
       {scheduleModalOpen && (
         <div
           onClick={() => setScheduleModalOpen(false)}
@@ -2204,7 +2853,7 @@ export function CalendarView({
                 <div className="flex items-center gap-2">
                   <CalendarIcon className="w-4 h-4 text-zinc-300" />
                   <h2 className="text-lg font-bold tracking-wide text-white">
-                    Schedule Task
+                    Schedule
                   </h2>
                 </div>
                 <div
@@ -2250,76 +2899,147 @@ export function CalendarView({
               </div>
             ) : (
               <form onSubmit={handleSaveScheduleModal} className="space-y-4">
-                {/* Mode Toggle: Existing Task vs Create New Task */}
-                <div className="grid grid-cols-2 gap-1 rounded-full border border-white/15 bg-[#0A0A0C] p-1">
+                {/* Mode Toggle: Existing vs + Task vs + Subtask */}
+                <div className="grid grid-cols-3 gap-1 rounded-full border border-white/15 bg-[#0A0A0C] p-1">
                   <button
                     type="button"
                     disabled={flatTasks.length === 0}
-                    onClick={() => setScheduleMode('existing')}
+                    onClick={() => {
+                      setScheduleMode('existing');
+                      if (!modalTaskId && flatTasks[0]) {
+                        setModalTaskId(String(flatTasks[0].task.id));
+                        setModalSubtaskId('');
+                      }
+                    }}
                     className={`rounded-full py-1.5 text-xs font-medium transition disabled:opacity-40 ${
                       scheduleMode === 'existing'
                         ? 'bg-white text-[#0A0A0C] font-semibold'
                         : 'text-zinc-400 hover:text-white'
                     }`}
                   >
-                    Existing Task
+                    Existing
                   </button>
                   <button
                     type="button"
-                    onClick={() => setScheduleMode('new')}
+                    onClick={() => setScheduleMode('new-task')}
                     className={`rounded-full py-1.5 text-xs font-medium transition ${
-                      scheduleMode === 'new'
+                      scheduleMode === 'new-task'
                         ? 'bg-white text-[#0A0A0C] font-semibold'
                         : 'text-zinc-400 hover:text-white'
                     }`}
                   >
-                    + New Task
+                    + Task
+                  </button>
+                  <button
+                    type="button"
+                    disabled={flatTasks.length === 0}
+                    onClick={() => {
+                      setScheduleMode('new-subtask');
+                      if (!modalTaskId && flatTasks[0]) {
+                        setModalTaskId(String(flatTasks[0].task.id));
+                      }
+                    }}
+                    className={`rounded-full py-1.5 text-xs font-medium transition disabled:opacity-40 ${
+                      scheduleMode === 'new-subtask'
+                        ? 'bg-white text-[#0A0A0C] font-semibold'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    + Subtask
                   </button>
                 </div>
 
                 {scheduleMode === 'existing' ? (
-                  <div>
-                    <label className="block text-xs font-medium text-zinc-400 mb-1.5">
-                      Task
-                    </label>
-                    <select
-                      required
-                      value={modalTaskId}
-                      onChange={(e) => {
-                        setModalTaskId(e.target.value);
-                        const match = flatTasks.find(
-                          (f) => String(f.task.id) === e.target.value
-                        );
-                        setModalDuration(
-                          match?.task.scheduled_duration_minutes ?? null
-                        );
-                      }}
-                      className="w-full rounded-xl border border-white/15 bg-[#0A0A0C] px-3 py-2.5 text-sm text-white focus:border-white/40 focus:outline-none"
-                    >
-                      <option value="">Select a task...</option>
-                      {boards.map((board) =>
-                        board.projects.map((proj) =>
-                          proj.tasks.length > 0 ? (
-                            <optgroup
-                              key={proj.id}
-                              label={`${board.name} / ${proj.name}`}
-                            >
-                              {proj.tasks.map((t) => (
-                                <option key={t.id} value={t.id}>
-                                  {t.completed ? '[Done] ' : ''}
-                                  {t.title}
-                                  {t.scheduled_date
-                                    ? ` (${t.scheduled_date})`
-                                    : ''}
-                                </option>
-                              ))}
-                            </optgroup>
-                          ) : null
-                        )
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-400 mb-1.5">
+                        Task
+                      </label>
+                      <select
+                        required
+                        value={modalTaskId}
+                        onChange={(e) => {
+                          const nextTid = e.target.value;
+                          setModalTaskId(nextTid);
+                          setModalSubtaskId('');
+                          const match = flatTasks.find(
+                            (f) => String(f.task.id) === nextTid
+                          );
+                          setModalDuration(
+                            match?.task.scheduled_duration_minutes ?? null
+                          );
+                        }}
+                        className="w-full rounded-xl border border-white/15 bg-[#0A0A0C] px-3 py-2.5 text-sm text-white focus:border-white/40 focus:outline-none"
+                      >
+                        <option value="">Select a task...</option>
+                        {boards.map((board) =>
+                          board.projects.map((proj) =>
+                            proj.tasks.length > 0 ? (
+                              <optgroup
+                                key={proj.id}
+                                label={`${board.name} / ${proj.name}`}
+                              >
+                                {proj.tasks.map((t) => (
+                                  <option key={t.id} value={t.id}>
+                                    {t.completed ? '[Done] ' : ''}
+                                    {t.title}
+                                    {t.scheduled_date
+                                      ? ` (${t.scheduled_date})`
+                                      : ''}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            ) : null
+                          )
+                        )}
+                      </select>
+                    </div>
+
+                    {selectedModalTaskObj &&
+                      selectedModalTaskObj.task.subtasks.length > 0 && (
+                        <div>
+                          <label className="block text-xs font-medium text-zinc-400 mb-1.5">
+                            Subtask (optional)
+                          </label>
+                          <select
+                            value={modalSubtaskId}
+                            onChange={(e) => {
+                              const nextSubId = e.target.value;
+                              setModalSubtaskId(nextSubId);
+                              if (nextSubId) {
+                                const sub =
+                                  selectedModalTaskObj.task.subtasks.find(
+                                    (s) => String(s.id) === nextSubId
+                                  );
+                                setModalDuration(
+                                  sub?.scheduled_duration_minutes ?? null
+                                );
+                              } else {
+                                setModalDuration(
+                                  selectedModalTaskObj.task
+                                    .scheduled_duration_minutes ?? null
+                                );
+                              }
+                            }}
+                            className="w-full rounded-xl border border-white/15 bg-[#0A0A0C] px-3 py-2 text-sm text-white focus:border-white/40 focus:outline-none"
+                          >
+                            <option value="">
+                              None (schedule task directly)
+                            </option>
+                            {selectedModalTaskObj.task.subtasks.map((sub) => (
+                              <option key={sub.id} value={sub.id}>
+                                {sub.completed ? '[Done] ' : ''}
+                                {sub.title}
+                                {sub.scheduled_date
+                                  ? ` (${sub.scheduled_date})`
+                                  : ''}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
                       )}
-                    </select>
                   </div>
-                ) : (
+                ) : scheduleMode === 'new-task' ? (
                   <div className="space-y-3">
                     <div>
                       <label className="block text-xs font-medium text-zinc-400 mb-1.5">
@@ -2348,6 +3068,54 @@ export function CalendarView({
                         value={modalNewTaskTitle}
                         onChange={(e) => setModalNewTaskTitle(e.target.value)}
                         placeholder="e.g. Draft architecture doc"
+                        className="w-full rounded-xl border border-white/15 bg-white/[0.07] px-3.5 py-2.5 text-sm text-white placeholder:text-zinc-600 focus:border-white/40 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-400 mb-1.5">
+                        Parent Task
+                      </label>
+                      <select
+                        required
+                        value={modalTaskId}
+                        onChange={(e) => setModalTaskId(e.target.value)}
+                        className="w-full rounded-xl border border-white/15 bg-[#0A0A0C] px-3 py-2.5 text-sm text-white focus:border-white/40 focus:outline-none"
+                      >
+                        <option value="">Select a parent task...</option>
+                        {boards.map((board) =>
+                          board.projects.map((proj) =>
+                            proj.tasks.length > 0 ? (
+                              <optgroup
+                                key={proj.id}
+                                label={`${board.name} / ${proj.name}`}
+                              >
+                                {proj.tasks.map((t) => (
+                                  <option key={t.id} value={t.id}>
+                                    {t.completed ? '[Done] ' : ''}
+                                    {t.title}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            ) : null
+                          )
+                        )}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-400 mb-1.5">
+                        Subtask Title
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={modalNewSubtaskTitle}
+                        onChange={(e) =>
+                          setModalNewSubtaskTitle(e.target.value)
+                        }
+                        placeholder="e.g. Write API validation"
                         className="w-full rounded-xl border border-white/15 bg-white/[0.07] px-3.5 py-2.5 text-sm text-white placeholder:text-zinc-600 focus:border-white/40 focus:outline-none"
                       />
                     </div>
@@ -2436,29 +3204,24 @@ export function CalendarView({
 
                 <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
                   <div className="flex items-center gap-2">
-                    {editingTaskObj?.task.scheduled_date && (
+                    {editingItemObj?.scheduled_date && (
                       <button
                         type="button"
                         disabled={busy}
                         onClick={() =>
-                          void handleUnscheduleTask(editingTaskObj.task.id)
+                          void handleUnscheduleItem(editingItemObj)
                         }
                         className="rounded-full border border-rose-500/35 bg-rose-500/10 hover:bg-rose-500/20 px-3.5 py-2 text-xs font-medium text-rose-300 transition"
                       >
                         Unschedule
                       </button>
                     )}
-                    {editingTaskObj && (
+                    {editingItemObj && (
                       <button
                         type="button"
                         onClick={() => {
                           setScheduleModalOpen(false);
-                          onStartWork({
-                            boardId: editingTaskObj.board.id,
-                            projectId: editingTaskObj.project.id,
-                            taskId: editingTaskObj.task.id,
-                            subtaskId: null,
-                          });
+                          startWorkForItem(editingItemObj);
                         }}
                         className="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/[0.05] hover:border-white/35 px-3.5 py-2 text-xs font-medium text-white transition"
                       >
@@ -2690,13 +3453,14 @@ export function CalendarView({
         </div>
       )}
 
-      {/* Floating Unclipped HUD Task Detail Popover */}
+      {/* Floating Unclipped HUD Task/Subtask Detail Popover */}
       {hoveredCalendarItem &&
-        draggingTaskId === null &&
+        draggingItemKey === null &&
         !scheduleModalOpen &&
         !logModalOpen &&
         (() => {
-          const { task, project, board, rect } = hoveredCalendarItem;
+          const { item, rect } = hoveredCalendarItem;
+          const { task, project, board } = item;
           const popWidth = 280;
           const winWidth =
             typeof window !== 'undefined' ? window.innerWidth : 1200;
@@ -2739,48 +3503,61 @@ export function CalendarView({
                 </div>
                 <span
                   className={`rounded-full px-2 py-0.5 text-[9px] font-mono shrink-0 ${
-                    task.completed
+                    item.completed
                       ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-400/30'
                       : 'bg-white/[0.06] text-zinc-300 border border-white/10'
                   }`}
                 >
-                  {task.completed ? 'Done' : 'Scheduled'}
+                  {item.kind === 'subtask'
+                    ? item.completed
+                      ? 'Subtask · Done'
+                      : 'Subtask'
+                    : item.completed
+                      ? 'Done'
+                      : 'Scheduled'}
                 </span>
               </div>
 
-              {/* Full Untruncated Task Title */}
+              {item.kind === 'subtask' && (
+                <div className="flex items-center gap-1 text-[11px] text-zinc-400 mb-1 min-w-0">
+                  <CornerDownRight className="w-3 h-3 text-zinc-500 shrink-0" />
+                  <span className="truncate">{task.title}</span>
+                </div>
+              )}
+
+              {/* Full Untruncated Title */}
               <p
                 className={`text-sm font-semibold leading-snug break-words ${
-                  task.completed ? 'line-through text-zinc-400' : 'text-white'
+                  item.completed ? 'line-through text-zinc-400' : 'text-white'
                 }`}
               >
-                {task.title}
+                {item.title}
               </p>
 
               {/* Schedule & Focus Telemetry */}
               <div className="mt-2.5 flex flex-wrap items-center gap-1.5 text-[10px] font-mono text-zinc-300">
                 <span className="rounded-md bg-white/[0.06] border border-white/10 px-1.5 py-0.5">
-                  {task.scheduled_date
-                    ? formatShortDateLabel(task.scheduled_date)
+                  {item.scheduled_date
+                    ? formatShortDateLabel(item.scheduled_date)
                     : 'Unscheduled'}
                 </span>
                 <span className="rounded-md bg-white/[0.06] border border-white/10 px-1.5 py-0.5">
-                  {task.scheduled_time || 'All day'}
+                  {item.scheduled_time || 'All day'}
                 </span>
-                {task.scheduled_duration_minutes && (
+                {item.scheduled_duration_minutes && (
                   <span className="rounded-md bg-white/[0.06] border border-white/10 px-1.5 py-0.5">
-                    {task.scheduled_duration_minutes}m
+                    {item.scheduled_duration_minutes}m
                   </span>
                 )}
-                {task.time_spent_seconds > 0 && (
+                {item.time_spent_seconds > 0 && (
                   <span className="rounded-md bg-emerald-500/10 border border-emerald-400/25 px-1.5 py-0.5 text-emerald-300">
-                    {formatLoggedDuration(task.time_spent_seconds)} focused
+                    {formatLoggedDuration(item.time_spent_seconds)} focused
                   </span>
                 )}
               </div>
 
-              {/* Subtasks Summary */}
-              {task.subtasks.length > 0 && (
+              {/* Subtasks Summary (when hovering a parent task) */}
+              {item.kind === 'task' && task.subtasks.length > 0 && (
                 <div className="mt-2.5 pt-2 border-t border-white/[0.08]">
                   <p className="text-[10px] font-mono text-zinc-400 mb-1">
                     {completedSubs}/{task.subtasks.length} subtasks
@@ -2811,6 +3588,11 @@ export function CalendarView({
                         >
                           {sub.title}
                         </span>
+                        {sub.scheduled_date && (
+                          <span className="ml-auto text-[9px] font-mono text-zinc-500 shrink-0">
+                            {formatShortDateLabel(sub.scheduled_date)}
+                          </span>
+                        )}
                       </div>
                     ))}
                     {task.subtasks.length > 4 && (

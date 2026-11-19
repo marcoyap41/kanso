@@ -488,6 +488,41 @@ function parseDurationMinutes(raw, fallback = 60) {
 }
 
 /**
+ * Parse and validate optional schedule fields on task/subtask creation.
+ */
+function parseScheduleFields(body) {
+  const rawDate = body?.scheduled_date;
+  const rawTime = body?.scheduled_time;
+  const rawDuration = body?.scheduled_duration_minutes;
+
+  let scheduledDate = null;
+  if (rawDate !== undefined && rawDate !== null && rawDate !== '') {
+    if (typeof rawDate !== 'string' || !isValidDateKey(rawDate.trim())) {
+      return { error: 'scheduled_date must be YYYY-MM-DD or null' };
+    }
+    scheduledDate = rawDate.trim();
+  }
+
+  let scheduledTime = null;
+  if (rawTime !== undefined && rawTime !== null && rawTime !== '') {
+    if (typeof rawTime !== 'string' || !isValidTimeStr(rawTime.trim())) {
+      return { error: 'scheduled_time must be HH:MM or null' };
+    }
+    scheduledTime = rawTime.trim();
+  }
+
+  let scheduledDuration = null;
+  if (rawDuration !== undefined && rawDuration !== null && rawDuration !== '') {
+    scheduledDuration = parseDurationMinutes(rawDuration, null);
+    if (scheduledDuration === null) {
+      return { error: 'scheduled_duration_minutes must be an integer between 15 and 720 or null' };
+    }
+  }
+
+  return { scheduledDate, scheduledTime, scheduledDuration };
+}
+
+/**
  * Look up board/project/task/subtask metadata for focus session logging.
  */
 async function fetchFocusTargetMeta(userId, table, itemId) {
@@ -602,25 +637,26 @@ async function fetchUserHierarchy(userId) {
       [userId]
     ),
     pool.query(
-      `SELECT id, board_id, name, description, created_at
+      `SELECT id, board_id, name, description, position, created_at
        FROM projects
        WHERE user_id = $1
-       ORDER BY id ASC`,
+       ORDER BY position ASC, id ASC`,
       [userId]
     ),
     pool.query(
       `SELECT id, project_id, title, completed, time_spent_seconds,
-              scheduled_date, scheduled_time, scheduled_duration_minutes, created_at
+              scheduled_date, scheduled_time, scheduled_duration_minutes, position, created_at
        FROM tasks
        WHERE user_id = $1
-       ORDER BY id ASC`,
+       ORDER BY position ASC, id ASC`,
       [userId]
     ),
     pool.query(
-      `SELECT id, task_id, title, completed, time_spent_seconds, created_at
+      `SELECT id, task_id, title, completed, time_spent_seconds,
+              scheduled_date, scheduled_time, scheduled_duration_minutes, position, created_at
        FROM subtasks
        WHERE user_id = $1
-       ORDER BY id ASC`,
+       ORDER BY position ASC, id ASC`,
       [userId]
     ),
   ]);
@@ -656,7 +692,7 @@ async function fetchUserHierarchy(userId) {
 }
 
 /**
- * Shared update handler for tasks and subtasks (title, completed, time_spent_seconds delta, and task schedule).
+ * Shared update handler for tasks and subtasks (title, completed, time_spent_seconds delta, and schedule).
  */
 async function updateTimedItem(table, req, res) {
   const itemId = parseId(req.params.id);
@@ -686,7 +722,7 @@ async function updateTimedItem(table, req, res) {
     updates.push(`completed = $${values.length}`);
   }
 
-  if (table === 'tasks') {
+  if (table === 'tasks' || table === 'subtasks') {
     if (scheduled_date !== undefined) {
       if (scheduled_date === null || scheduled_date === '') {
         values.push(null);
@@ -783,6 +819,108 @@ async function deleteOwnedItem(table, req, res) {
   }
 
   return res.json({ deleted: true, id: itemId });
+}
+
+/**
+ * Shared transactional reorder helper for boards, projects, tasks, and subtasks.
+ */
+async function reorderOwnedItems(
+  {
+    table,
+    parentColumn = null,
+    parentTable = null,
+    parentId = null,
+    orderedIds,
+    userId,
+  },
+  res
+) {
+  if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+    return res.status(400).json({
+      error: 'ordered_ids must be a non-empty array of unique positive integer IDs',
+    });
+  }
+
+  const parsedIds = orderedIds.map(parseId);
+  if (
+    parsedIds.some((id) => !id) ||
+    new Set(parsedIds).size !== parsedIds.length
+  ) {
+    return res.status(400).json({
+      error: 'ordered_ids must be a non-empty array of unique positive integer IDs',
+    });
+  }
+
+  let parsedParentId = null;
+  if (parentColumn) {
+    parsedParentId = parseId(parentId);
+    if (!parsedParentId) {
+      return res.status(400).json({ error: `Valid ${parentColumn} is required` });
+    }
+    if (!(await ensureOwned(parentTable, parsedParentId, userId))) {
+      return res.status(404).json({ error: 'Parent item not found' });
+    }
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const existingRes = parentColumn
+      ? await client.query(
+          `SELECT id FROM ${table}
+           WHERE user_id = $1 AND ${parentColumn} = $2
+           ORDER BY position ASC, id ASC`,
+          [userId, parsedParentId]
+        )
+      : await client.query(
+          `SELECT id FROM ${table}
+           WHERE user_id = $1
+           ORDER BY position ASC, id ASC`,
+          [userId]
+        );
+
+    const siblingSet = new Set(existingRes.rows.map((r) => r.id));
+    if (parsedIds.some((id) => !siblingSet.has(id))) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: 'ordered_ids contains items that do not belong to this container',
+      });
+    }
+
+    const providedSet = new Set(parsedIds);
+    const finalIds = [
+      ...parsedIds,
+      ...existingRes.rows.map((r) => r.id).filter((id) => !providedSet.has(id)),
+    ];
+    const positions = finalIds.map((_, idx) => idx);
+
+    if (parentColumn) {
+      await client.query(
+        `UPDATE ${table} AS t
+         SET position = v.pos
+         FROM UNNEST($1::int[], $2::int[]) AS v(id, pos)
+         WHERE t.id = v.id AND t.user_id = $3 AND t.${parentColumn} = $4`,
+        [finalIds, positions, userId, parsedParentId]
+      );
+    } else {
+      await client.query(
+        `UPDATE ${table} AS t
+         SET position = v.pos
+         FROM UNNEST($1::int[], $2::int[]) AS v(id, pos)
+         WHERE t.id = v.id AND t.user_id = $3`,
+        [finalIds, positions, userId]
+      );
+    }
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, ordered_ids: finalIds });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // Health check
@@ -1308,6 +1446,22 @@ app.post('/api/boards', authMiddleware, async (req, res) => {
   }
 });
 
+app.put('/api/boards/reorder', authMiddleware, async (req, res) => {
+  try {
+    return await reorderOwnedItems(
+      {
+        table: 'task_boards',
+        orderedIds: req.body?.ordered_ids,
+        userId: req.user.id,
+      },
+      res
+    );
+  } catch (err) {
+    console.error('Reorder boards error:', err);
+    return res.status(500).json({ error: 'Failed to reorder task boards' });
+  }
+});
+
 app.patch('/api/boards/:id', authMiddleware, async (req, res) => {
   const boardId = parseId(req.params.id);
   if (!boardId) return res.status(400).json({ error: 'Invalid board ID' });
@@ -1375,16 +1529,41 @@ app.post('/api/projects', authMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'Task board not found' });
     }
 
+    const posRes = await pool.query(
+      'SELECT COALESCE(MAX(position), -1)::int AS max_pos FROM projects WHERE board_id = $1 AND user_id = $2',
+      [boardId, req.user.id]
+    );
+    const nextPos = posRes.rows[0].max_pos + 1;
+
     const result = await pool.query(
-      `INSERT INTO projects (board_id, user_id, name, description)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, board_id, name, description, created_at`,
-      [boardId, req.user.id, name, description]
+      `INSERT INTO projects (board_id, user_id, name, description, position)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, board_id, name, description, position, created_at`,
+      [boardId, req.user.id, name, description, nextPos]
     );
     return res.status(201).json({ ...result.rows[0], tasks: [] });
   } catch (err) {
     console.error('Create project error:', err);
     return res.status(500).json({ error: 'Failed to create project' });
+  }
+});
+
+app.put('/api/projects/reorder', authMiddleware, async (req, res) => {
+  try {
+    return await reorderOwnedItems(
+      {
+        table: 'projects',
+        parentColumn: 'board_id',
+        parentTable: 'task_boards',
+        parentId: req.body?.board_id,
+        orderedIds: req.body?.ordered_ids,
+        userId: req.user.id,
+      },
+      res
+    );
+  } catch (err) {
+    console.error('Reorder projects error:', err);
+    return res.status(500).json({ error: 'Failed to reorder projects' });
   }
 });
 
@@ -1418,7 +1597,7 @@ app.patch('/api/projects/:id', authMiddleware, async (req, res) => {
       `UPDATE projects
        SET ${updates.join(', ')}
        WHERE id = $${values.length - 1} AND user_id = $${values.length}
-       RETURNING id, board_id, name, description, created_at`,
+       RETURNING id, board_id, name, description, position, created_at`,
       values
     );
 
@@ -1445,53 +1624,55 @@ app.delete('/api/projects/:id', authMiddleware, async (req, res) => {
 app.post('/api/tasks', authMiddleware, async (req, res) => {
   const projectId = parseId(req.body?.project_id);
   const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
-  const rawDate = req.body?.scheduled_date;
-  const rawTime = req.body?.scheduled_time;
-  const rawDuration = req.body?.scheduled_duration_minutes;
 
   if (!projectId) return res.status(400).json({ error: 'Valid project_id is required' });
   if (!title) return res.status(400).json({ error: 'Task title is required' });
 
-  let scheduledDate = null;
-  if (rawDate !== undefined && rawDate !== null && rawDate !== '') {
-    if (typeof rawDate !== 'string' || !isValidDateKey(rawDate.trim())) {
-      return res.status(400).json({ error: 'scheduled_date must be YYYY-MM-DD or null' });
-    }
-    scheduledDate = rawDate.trim();
-  }
-
-  let scheduledTime = null;
-  if (rawTime !== undefined && rawTime !== null && rawTime !== '') {
-    if (typeof rawTime !== 'string' || !isValidTimeStr(rawTime.trim())) {
-      return res.status(400).json({ error: 'scheduled_time must be HH:MM or null' });
-    }
-    scheduledTime = rawTime.trim();
-  }
-
-  let scheduledDuration = null;
-  if (rawDuration !== undefined && rawDuration !== null && rawDuration !== '') {
-    scheduledDuration = parseDurationMinutes(rawDuration, null);
-    if (scheduledDuration === null) {
-      return res.status(400).json({ error: 'scheduled_duration_minutes must be an integer between 15 and 720 or null' });
-    }
-  }
+  const schedule = parseScheduleFields(req.body);
+  if (schedule.error) return res.status(400).json({ error: schedule.error });
+  const { scheduledDate, scheduledTime, scheduledDuration } = schedule;
 
   try {
     if (!(await ensureOwned('projects', projectId, req.user.id))) {
       return res.status(404).json({ error: 'Project not found' });
     }
 
+    const posRes = await pool.query(
+      'SELECT COALESCE(MAX(position), -1)::int AS max_pos FROM tasks WHERE project_id = $1 AND user_id = $2',
+      [projectId, req.user.id]
+    );
+    const nextPos = posRes.rows[0].max_pos + 1;
+
     const result = await pool.query(
-      `INSERT INTO tasks (project_id, user_id, title, scheduled_date, scheduled_time, scheduled_duration_minutes)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO tasks (project_id, user_id, title, scheduled_date, scheduled_time, scheduled_duration_minutes, position)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id, project_id, title, completed, time_spent_seconds,
-                 scheduled_date, scheduled_time, scheduled_duration_minutes, created_at`,
-      [projectId, req.user.id, title, scheduledDate, scheduledTime, scheduledDuration]
+                 scheduled_date, scheduled_time, scheduled_duration_minutes, position, created_at`,
+      [projectId, req.user.id, title, scheduledDate, scheduledTime, scheduledDuration, nextPos]
     );
     return res.status(201).json({ ...result.rows[0], subtasks: [] });
   } catch (err) {
     console.error('Create task error:', err);
     return res.status(500).json({ error: 'Failed to create task' });
+  }
+});
+
+app.put('/api/tasks/reorder', authMiddleware, async (req, res) => {
+  try {
+    return await reorderOwnedItems(
+      {
+        table: 'tasks',
+        parentColumn: 'project_id',
+        parentTable: 'projects',
+        parentId: req.body?.project_id,
+        orderedIds: req.body?.ordered_ids,
+        userId: req.user.id,
+      },
+      res
+    );
+  } catch (err) {
+    console.error('Reorder tasks error:', err);
+    return res.status(500).json({ error: 'Failed to reorder tasks' });
   }
 });
 
@@ -1521,21 +1702,51 @@ app.post('/api/subtasks', authMiddleware, async (req, res) => {
   if (!taskId) return res.status(400).json({ error: 'Valid task_id is required' });
   if (!title) return res.status(400).json({ error: 'Subtask title is required' });
 
+  const schedule = parseScheduleFields(req.body);
+  if (schedule.error) return res.status(400).json({ error: schedule.error });
+  const { scheduledDate, scheduledTime, scheduledDuration } = schedule;
+
   try {
     if (!(await ensureOwned('tasks', taskId, req.user.id))) {
       return res.status(404).json({ error: 'Task not found' });
     }
 
+    const posRes = await pool.query(
+      'SELECT COALESCE(MAX(position), -1)::int AS max_pos FROM subtasks WHERE task_id = $1 AND user_id = $2',
+      [taskId, req.user.id]
+    );
+    const nextPos = posRes.rows[0].max_pos + 1;
+
     const result = await pool.query(
-      `INSERT INTO subtasks (task_id, user_id, title)
-       VALUES ($1, $2, $3)
-       RETURNING id, task_id, title, completed, time_spent_seconds, created_at`,
-      [taskId, req.user.id, title]
+      `INSERT INTO subtasks (task_id, user_id, title, scheduled_date, scheduled_time, scheduled_duration_minutes, position)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, task_id, title, completed, time_spent_seconds,
+                 scheduled_date, scheduled_time, scheduled_duration_minutes, position, created_at`,
+      [taskId, req.user.id, title, scheduledDate, scheduledTime, scheduledDuration, nextPos]
     );
     return res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('Create subtask error:', err);
     return res.status(500).json({ error: 'Failed to create subtask' });
+  }
+});
+
+app.put('/api/subtasks/reorder', authMiddleware, async (req, res) => {
+  try {
+    return await reorderOwnedItems(
+      {
+        table: 'subtasks',
+        parentColumn: 'task_id',
+        parentTable: 'tasks',
+        parentId: req.body?.task_id,
+        orderedIds: req.body?.ordered_ids,
+        userId: req.user.id,
+      },
+      res
+    );
+  } catch (err) {
+    console.error('Reorder subtasks error:', err);
+    return res.status(500).json({ error: 'Failed to reorder subtasks' });
   }
 });
 

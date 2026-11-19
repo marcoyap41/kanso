@@ -70,8 +70,11 @@ async function initDb() {
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       name VARCHAR(160) NOT NULL,
       description TEXT DEFAULT '',
+      position INTEGER NOT NULL DEFAULT 0,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    ALTER TABLE projects ADD COLUMN IF NOT EXISTS position INTEGER NOT NULL DEFAULT 0;
 
     CREATE TABLE IF NOT EXISTS tasks (
       id SERIAL PRIMARY KEY,
@@ -83,12 +86,14 @@ async function initDb() {
       scheduled_date VARCHAR(10),
       scheduled_time VARCHAR(5),
       scheduled_duration_minutes INTEGER,
+      position INTEGER NOT NULL DEFAULT 0,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     ALTER TABLE tasks ADD COLUMN IF NOT EXISTS scheduled_date VARCHAR(10);
     ALTER TABLE tasks ADD COLUMN IF NOT EXISTS scheduled_time VARCHAR(5);
     ALTER TABLE tasks ADD COLUMN IF NOT EXISTS scheduled_duration_minutes INTEGER;
+    ALTER TABLE tasks ADD COLUMN IF NOT EXISTS position INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE tasks ALTER COLUMN scheduled_duration_minutes DROP NOT NULL;
     ALTER TABLE tasks ALTER COLUMN scheduled_duration_minutes DROP DEFAULT;
 
@@ -99,8 +104,17 @@ async function initDb() {
       title VARCHAR(200) NOT NULL,
       completed BOOLEAN NOT NULL DEFAULT FALSE,
       time_spent_seconds INTEGER NOT NULL DEFAULT 0,
+      scheduled_date VARCHAR(10),
+      scheduled_time VARCHAR(5),
+      scheduled_duration_minutes INTEGER,
+      position INTEGER NOT NULL DEFAULT 0,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    ALTER TABLE subtasks ADD COLUMN IF NOT EXISTS scheduled_date VARCHAR(10);
+    ALTER TABLE subtasks ADD COLUMN IF NOT EXISTS scheduled_time VARCHAR(5);
+    ALTER TABLE subtasks ADD COLUMN IF NOT EXISTS scheduled_duration_minutes INTEGER;
+    ALTER TABLE subtasks ADD COLUMN IF NOT EXISTS position INTEGER NOT NULL DEFAULT 0;
 
     CREATE TABLE IF NOT EXISTS focus_sessions (
       id SERIAL PRIMARY KEY,

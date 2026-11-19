@@ -12,6 +12,10 @@ export interface Subtask {
   title: string;
   completed: boolean;
   time_spent_seconds: number;
+  scheduled_date?: string | null;
+  scheduled_time?: string | null;
+  scheduled_duration_minutes?: number | null;
+  position: number;
   created_at?: string;
 }
 
@@ -24,6 +28,7 @@ export interface Task {
   scheduled_date?: string | null;
   scheduled_time?: string | null;
   scheduled_duration_minutes?: number | null;
+  position: number;
   created_at?: string;
   subtasks: Subtask[];
 }
@@ -52,6 +57,7 @@ export interface Project {
   board_id: number;
   name: string;
   description: string;
+  position: number;
   created_at?: string;
   tasks: Task[];
 }

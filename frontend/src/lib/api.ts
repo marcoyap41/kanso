@@ -254,6 +254,12 @@ export const api = {
       method: 'DELETE',
     }),
 
+  reorderBoards: (ordered_ids: number[]) =>
+    request<{ ok: boolean; ordered_ids: number[] }>('/api/boards/reorder', {
+      method: 'PUT',
+      body: JSON.stringify({ ordered_ids }),
+    }),
+
   createProject: (payload: {
     board_id: number;
     name: string;
@@ -276,6 +282,12 @@ export const api = {
   deleteProject: (id: number) =>
     request<{ deleted: boolean; id: number }>(`/api/projects/${id}`, {
       method: 'DELETE',
+    }),
+
+  reorderProjects: (board_id: number, ordered_ids: number[]) =>
+    request<{ ok: boolean; ordered_ids: number[] }>('/api/projects/reorder', {
+      method: 'PUT',
+      body: JSON.stringify({ board_id, ordered_ids }),
     }),
 
   createTask: (payload: {
@@ -314,7 +326,19 @@ export const api = {
       method: 'DELETE',
     }),
 
-  createSubtask: (payload: { task_id: number; title: string }) =>
+  reorderTasks: (project_id: number, ordered_ids: number[]) =>
+    request<{ ok: boolean; ordered_ids: number[] }>('/api/tasks/reorder', {
+      method: 'PUT',
+      body: JSON.stringify({ project_id, ordered_ids }),
+    }),
+
+  createSubtask: (payload: {
+    task_id: number;
+    title: string;
+    scheduled_date?: string | null;
+    scheduled_time?: string | null;
+    scheduled_duration_minutes?: number | null;
+  }) =>
     request<Subtask>('/api/subtasks', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -326,6 +350,9 @@ export const api = {
       title?: string;
       completed?: boolean;
       add_seconds?: number;
+      scheduled_date?: string | null;
+      scheduled_time?: string | null;
+      scheduled_duration_minutes?: number | null;
       mode?: TimerMode;
       session_date?: string;
       started_at?: string | null;
@@ -339,6 +366,12 @@ export const api = {
   deleteSubtask: (id: number) =>
     request<{ deleted: boolean; id: number }>(`/api/subtasks/${id}`, {
       method: 'DELETE',
+    }),
+
+  reorderSubtasks: (task_id: number, ordered_ids: number[]) =>
+    request<{ ok: boolean; ordered_ids: number[] }>('/api/subtasks/reorder', {
+      method: 'PUT',
+      body: JSON.stringify({ task_id, ordered_ids }),
     }),
 
   getFocusSessions: (params?: { from?: string; to?: string }) => {

@@ -1,12 +1,14 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
+import { LayoutGroup, motion } from 'framer-motion';
 import {
   Calendar,
   Check,
   ChevronDown,
   ChevronRight,
   FolderPlus,
+  GripVertical,
   Layers,
   Palette,
   Pencil,
@@ -25,9 +27,121 @@ import {
   BOARD_COLOR_PALETTE,
   MAX_TASK_BOARDS,
   type FocusSelection,
+  type Subtask,
   type Task,
   type TaskBoard,
 } from '@/types/kanso';
+
+type ScheduleTarget =
+  | { kind: 'task'; id: number }
+  | { kind: 'subtask'; id: number };
+
+type ReorderKind = 'board' | 'project' | 'task' | 'subtask';
+
+interface DragItem {
+  kind: ReorderKind;
+  id: number;
+  parentId: number | null;
+}
+
+interface DragPreview {
+  kind: ReorderKind;
+  parentId: number | null;
+  originalIds: number[];
+  orderedIds: number[];
+}
+
+const REORDER_SPRING = {
+  type: 'spring' as const,
+  stiffness: 520,
+  damping: 38,
+  mass: 0.8,
+};
+
+function arraysEqual(a: number[], b: number[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function moveItemToTargetIndex(
+  ids: number[],
+  sourceId: number,
+  targetId: number
+): number[] {
+  const fromIdx = ids.indexOf(sourceId);
+  const toIdx = ids.indexOf(targetId);
+  if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return ids;
+  const next = [...ids];
+  const [moved] = next.splice(fromIdx, 1);
+  next.splice(toIdx, 0, moved);
+  return next;
+}
+
+function stepOrderIds(ids: number[], itemId: number, delta: -1 | 1): number[] {
+  const idx = ids.indexOf(itemId);
+  const swapIdx = idx + delta;
+  if (idx === -1 || swapIdx < 0 || swapIdx >= ids.length) return ids;
+  const next = [...ids];
+  [next[idx], next[swapIdx]] = [next[swapIdx], next[idx]];
+  return next;
+}
+
+function reorderListByIds<T extends { id: number; position?: number }>(
+  items: T[],
+  orderedIds: number[]
+): T[] {
+  const byId = new Map(items.map((item) => [item.id, item]));
+  const seen = new Set<number>();
+  const ordered: T[] = [];
+
+  for (const id of orderedIds) {
+    const match = byId.get(id);
+    if (match) {
+      ordered.push(match);
+      seen.add(id);
+    }
+  }
+  for (const item of items) {
+    if (!seen.has(item.id)) ordered.push(item);
+  }
+  return ordered.map((item, idx) => ({ ...item, position: idx }));
+}
+
+function applyOptimisticReorder(
+  boards: TaskBoard[],
+  kind: ReorderKind,
+  parentId: number | null,
+  orderedIds: number[]
+): TaskBoard[] {
+  if (kind === 'board') {
+    return reorderListByIds(boards, orderedIds);
+  }
+  return boards.map((board) => {
+    if (kind === 'project') {
+      if (board.id !== parentId) return board;
+      return { ...board, projects: reorderListByIds(board.projects, orderedIds) };
+    }
+    return {
+      ...board,
+      projects: board.projects.map((project) => {
+        if (kind === 'task') {
+          if (project.id !== parentId) return project;
+          return { ...project, tasks: reorderListByIds(project.tasks, orderedIds) };
+        }
+        return {
+          ...project,
+          tasks: project.tasks.map((task) => {
+            if (task.id !== parentId) return task;
+            return { ...task, subtasks: reorderListByIds(task.subtasks, orderedIds) };
+          }),
+        };
+      }),
+    };
+  });
+}
 
 interface TaskManagementViewProps {
   boards: TaskBoard[];
@@ -71,18 +185,42 @@ export function TaskManagementView({
     {}
   );
 
-  // Task inline schedule editor state
-  const [schedulingTaskId, setSchedulingTaskId] = useState<number | null>(null);
+  // Task / subtask inline schedule editor state
+  const [schedulingTarget, setSchedulingTarget] =
+    useState<ScheduleTarget | null>(null);
   const [scheduleDateDraft, setScheduleDateDraft] = useState('');
   const [scheduleTimeDraft, setScheduleTimeDraft] = useState('');
   const [scheduleDurationDraft, setScheduleDurationDraft] = useState<
     number | null
   >(null);
 
-  const activeBoard =
-    boards.find((b) => b.id === selectedBoardId) || boards[0] || null;
+  // Live drag projection + optimistic reorder state
+  const [optimisticBoards, setOptimisticBoards] = useState<TaskBoard[] | null>(
+    null
+  );
+  const [dragItem, setDragItem] = useState<DragItem | null>(null);
+  const [dragPreview, setDragPreview] = useState<DragPreview | null>(null);
+  const dragItemRef = useRef<DragItem | null>(null);
+  const dragPreviewRef = useRef<DragPreview | null>(null);
+  const didDropRef = useRef(false);
+  const lastSwapRef = useRef<{ targetId: number; at: number } | null>(null);
 
-  const canCreateBoard = boards.length < MAX_TASK_BOARDS;
+  const baseBoards = optimisticBoards ?? boards;
+  const displayBoards = dragPreview
+    ? applyOptimisticReorder(
+        baseBoards,
+        dragPreview.kind,
+        dragPreview.parentId,
+        dragPreview.orderedIds
+      )
+    : baseBoards;
+
+  const activeBoard =
+    displayBoards.find((b) => b.id === selectedBoardId) ||
+    displayBoards[0] ||
+    null;
+
+  const canCreateBoard = displayBoards.length < MAX_TASK_BOARDS;
 
   async function runAction(fn: () => Promise<void>) {
     setError(null);
@@ -95,6 +233,203 @@ export function TaskManagementView({
     } finally {
       setBusy(false);
     }
+  }
+
+  async function commitReorder(
+    kind: ReorderKind,
+    parentId: number | null,
+    currentIds: number[],
+    nextIds: number[]
+  ) {
+    if (busy || arraysEqual(currentIds, nextIds)) return;
+
+    if (kind === 'board' && selectedBoardId === null && activeBoard) {
+      setSelectedBoardId(activeBoard.id);
+    }
+
+    setOptimisticBoards(
+      applyOptimisticReorder(baseBoards, kind, parentId, nextIds)
+    );
+
+    try {
+      await runAction(async () => {
+        if (kind === 'board') {
+          await api.reorderBoards(nextIds);
+        } else if (kind === 'project') {
+          await api.reorderProjects(parentId!, nextIds);
+        } else if (kind === 'task') {
+          await api.reorderTasks(parentId!, nextIds);
+        } else {
+          await api.reorderSubtasks(parentId!, nextIds);
+        }
+      });
+    } finally {
+      setOptimisticBoards(null);
+    }
+  }
+
+  function clearDragState() {
+    dragItemRef.current = null;
+    dragPreviewRef.current = null;
+    lastSwapRef.current = null;
+    setDragItem(null);
+    setDragPreview(null);
+  }
+
+  function startDrag(
+    e: React.DragEvent,
+    item: DragItem,
+    currentIds: number[],
+    cardSelector?: string
+  ) {
+    if (busy) {
+      e.preventDefault();
+      return;
+    }
+    e.stopPropagation();
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData(
+      'text/plain',
+      `${item.kind}:${item.parentId ?? 'root'}:${item.id}`
+    );
+    if (cardSelector) {
+      const card = e.currentTarget.closest(cardSelector) as HTMLElement | null;
+      if (card && e.dataTransfer.setDragImage) {
+        e.dataTransfer.setDragImage(card, 24, 20);
+      }
+    }
+    didDropRef.current = false;
+    lastSwapRef.current = null;
+    dragItemRef.current = item;
+    const initialPreview: DragPreview = {
+      kind: item.kind,
+      parentId: item.parentId,
+      originalIds: currentIds,
+      orderedIds: currentIds,
+    };
+    dragPreviewRef.current = initialPreview;
+    window.requestAnimationFrame(() => {
+      setDragItem(item);
+      setDragPreview(initialPreview);
+    });
+  }
+
+  function endDrag() {
+    clearDragState();
+  }
+
+  function handleProjectedDragOver(
+    e: React.DragEvent,
+    kind: ReorderKind,
+    targetId: number,
+    parentId: number | null,
+    axis: 'x' | 'y'
+  ) {
+    const current = dragItemRef.current;
+    const preview = dragPreviewRef.current;
+    if (
+      !current ||
+      !preview ||
+      current.kind !== kind ||
+      current.parentId !== parentId
+    ) {
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+    if (current.id === targetId) return;
+
+    const fromIdx = preview.orderedIds.indexOf(current.id);
+    const toIdx = preview.orderedIds.indexOf(targetId);
+    if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
+
+    const now = Date.now();
+    const elapsed = now - (lastSwapRef.current?.at ?? 0);
+
+    if (axis === 'y') {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const midY = rect.top + rect.height / 2;
+      if (fromIdx < toIdx && e.clientY < midY) return;
+      if (fromIdx > toIdx && e.clientY > midY) return;
+      if (elapsed < 120) return;
+    } else {
+      const minWait =
+        lastSwapRef.current?.targetId === targetId ? 320 : 180;
+      if (elapsed < minWait) return;
+    }
+
+    const nextIds = moveItemToTargetIndex(
+      preview.orderedIds,
+      current.id,
+      targetId
+    );
+    if (!arraysEqual(preview.orderedIds, nextIds)) {
+      lastSwapRef.current = { targetId, at: now };
+      const updated: DragPreview = { ...preview, orderedIds: nextIds };
+      dragPreviewRef.current = updated;
+      setDragPreview(updated);
+    }
+  }
+
+  function handleContainerDragOver(
+    e: React.DragEvent,
+    kind: ReorderKind,
+    parentId: number | null
+  ) {
+    const current = dragItemRef.current;
+    if (!current || current.kind !== kind || current.parentId !== parentId) {
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+  }
+
+  function handleProjectedDrop(
+    e: React.DragEvent,
+    kind: ReorderKind,
+    parentId: number | null
+  ) {
+    const current = dragItemRef.current;
+    const preview = dragPreviewRef.current;
+    if (
+      !current ||
+      !preview ||
+      current.kind !== kind ||
+      current.parentId !== parentId
+    ) {
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    didDropRef.current = true;
+    const { originalIds, orderedIds } = preview;
+    clearDragState();
+    void commitReorder(kind, parentId, originalIds, orderedIds);
+  }
+
+  function handleHandleKeyDown(
+    e: React.KeyboardEvent,
+    kind: ReorderKind,
+    itemId: number,
+    parentId: number | null,
+    currentIds: number[],
+    axis: 'x' | 'y'
+  ) {
+    let delta: -1 | 1 | null = null;
+    if (axis === 'x') {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') delta = -1;
+      else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') delta = 1;
+    } else {
+      if (e.key === 'ArrowUp') delta = -1;
+      else if (e.key === 'ArrowDown') delta = 1;
+    }
+    if (delta === null) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const nextIds = stepOrderIds(currentIds, itemId, delta);
+    void commitReorder(kind, parentId, currentIds, nextIds);
   }
 
   async function handleCreateBoard(e: React.FormEvent) {
@@ -210,38 +545,155 @@ export function TaskManagementView({
     });
   }
 
-  function openScheduleEditor(task: Task) {
-    if (schedulingTaskId === task.id) {
-      setSchedulingTaskId(null);
+  function openScheduleEditor(
+    kind: ScheduleTarget['kind'],
+    item: Task | Subtask
+  ) {
+    if (schedulingTarget?.kind === kind && schedulingTarget.id === item.id) {
+      setSchedulingTarget(null);
       return;
     }
-    setSchedulingTaskId(task.id);
-    setScheduleDateDraft(task.scheduled_date || toLocalDateKey(new Date()));
-    setScheduleTimeDraft(task.scheduled_time || '');
-    setScheduleDurationDraft(task.scheduled_duration_minutes ?? null);
+    setSchedulingTarget({ kind, id: item.id });
+    setScheduleDateDraft(item.scheduled_date || toLocalDateKey(new Date()));
+    setScheduleTimeDraft(item.scheduled_time || '');
+    setScheduleDurationDraft(item.scheduled_duration_minutes ?? null);
   }
 
-  async function handleSaveSchedule(e: React.FormEvent, taskId: number) {
+  async function applyScheduleUpdate(
+    target: ScheduleTarget,
+    payload: {
+      scheduled_date: string | null;
+      scheduled_time: string | null;
+      scheduled_duration_minutes: number | null;
+    }
+  ) {
+    await runAction(async () => {
+      if (target.kind === 'task') {
+        await api.updateTask(target.id, payload);
+      } else {
+        await api.updateSubtask(target.id, payload);
+      }
+      setSchedulingTarget(null);
+    });
+  }
+
+  async function handleSaveSchedule(
+    e: React.FormEvent,
+    target: ScheduleTarget
+  ) {
     e.preventDefault();
-    await runAction(async () => {
-      await api.updateTask(taskId, {
-        scheduled_date: scheduleDateDraft || null,
-        scheduled_time: scheduleTimeDraft || null,
-        scheduled_duration_minutes: scheduleDurationDraft,
-      });
-      setSchedulingTaskId(null);
+    await applyScheduleUpdate(target, {
+      scheduled_date: scheduleDateDraft || null,
+      scheduled_time: scheduleTimeDraft || null,
+      scheduled_duration_minutes: scheduleDurationDraft,
     });
   }
 
-  async function handleClearSchedule(taskId: number) {
-    await runAction(async () => {
-      await api.updateTask(taskId, {
-        scheduled_date: null,
-        scheduled_time: null,
-        scheduled_duration_minutes: null,
-      });
-      setSchedulingTaskId(null);
+  async function handleClearSchedule(target: ScheduleTarget) {
+    await applyScheduleUpdate(target, {
+      scheduled_date: null,
+      scheduled_time: null,
+      scheduled_duration_minutes: null,
     });
+  }
+
+  function renderInlineScheduleForm(
+    target: ScheduleTarget,
+    hasSchedule: boolean
+  ) {
+    return (
+      <form
+        onSubmit={(e) => handleSaveSchedule(e, target)}
+        className="mt-2.5 rounded-xl border border-white/15 bg-[#0A0A0C] p-3 flex flex-wrap items-end gap-2.5"
+      >
+        <div className="flex-1 min-w-[130px]">
+          <label className="block text-[11px] font-medium text-zinc-400 mb-1">
+            Date
+          </label>
+          <input
+            type="date"
+            required
+            value={scheduleDateDraft}
+            onChange={(e) => setScheduleDateDraft(e.target.value)}
+            className="w-full rounded-lg border border-white/15 bg-white/[0.07] px-2.5 py-1.5 text-xs text-white focus:border-white/35 focus:outline-none [color-scheme:dark]"
+          />
+        </div>
+
+        <div className="w-28">
+          <label className="block text-[11px] font-medium text-zinc-400 mb-1">
+            Time (opt)
+          </label>
+          <input
+            type="time"
+            value={scheduleTimeDraft}
+            onChange={(e) => setScheduleTimeDraft(e.target.value)}
+            className="w-full rounded-lg border border-white/15 bg-white/[0.07] px-2.5 py-1.5 text-xs text-white focus:border-white/35 focus:outline-none [color-scheme:dark]"
+          />
+        </div>
+
+        <div className="w-24">
+          <label className="block text-[11px] font-medium text-zinc-400 mb-1">
+            Duration (opt)
+          </label>
+          <select
+            value={scheduleDurationDraft ?? ''}
+            onChange={(e) =>
+              setScheduleDurationDraft(
+                e.target.value ? Number(e.target.value) : null
+              )
+            }
+            className="w-full rounded-lg border border-white/15 bg-[#121318] px-2 py-1.5 text-xs text-white focus:border-white/35 focus:outline-none"
+          >
+            <option value="">-</option>
+            {scheduleDurationDraft !== null &&
+              ![15, 25, 30, 45, 50, 60, 90, 120, 180, 240].includes(
+                scheduleDurationDraft
+              ) && (
+                <option value={scheduleDurationDraft}>
+                  {scheduleDurationDraft}m
+                </option>
+              )}
+            <option value={15}>15m</option>
+            <option value={25}>25m</option>
+            <option value={30}>30m</option>
+            <option value={45}>45m</option>
+            <option value={50}>50m</option>
+            <option value={60}>1h</option>
+            <option value={90}>1h 30m</option>
+            <option value={120}>2h</option>
+            <option value={180}>3h</option>
+            <option value={240}>4h</option>
+          </select>
+        </div>
+
+        <div className="flex items-center gap-1.5 ml-auto">
+          {hasSchedule && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => handleClearSchedule(target)}
+              className="rounded-lg border border-rose-500/35 bg-rose-500/10 hover:bg-rose-500/20 px-2.5 py-1.5 text-[11px] font-medium text-rose-300 transition"
+            >
+              Clear
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setSchedulingTarget(null)}
+            className="rounded-lg border border-white/15 px-2.5 py-1.5 text-[11px] text-zinc-400 hover:text-white transition"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={busy}
+            className="rounded-lg bg-white text-[#0A0A0C] hover:bg-zinc-200 px-3 py-1.5 text-[11px] font-semibold transition"
+          >
+            Save
+          </button>
+        </div>
+      </form>
+    );
   }
 
   return (
@@ -278,7 +730,7 @@ export function TaskManagementView({
 
         <div className="flex items-center gap-2.5">
           <span className="rounded-full border border-white/15 bg-white/[0.04] px-3.5 py-2 text-xs font-mono text-zinc-300">
-            {boards.length} / {MAX_TASK_BOARDS} Boards
+            {displayBoards.length} / {MAX_TASK_BOARDS} Boards
           </span>
           <button
             type="button"
@@ -374,138 +826,206 @@ export function TaskManagementView({
       )}
 
       {/* Task Boards Strip (up to 5) */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-8">
-        {boards.map((board) => {
-          const isSelected = activeBoard?.id === board.id;
-          const isEditing = editingBoardId === board.id;
-          const totalTasks = board.projects.reduce(
-            (sum, p) => sum + p.tasks.length,
-            0
-          );
-
-          if (isEditing) {
-            return (
-              <form
-                key={board.id}
-                onSubmit={(e) => handleSaveBoardEdit(e, board.id)}
-                className="rounded-2xl border border-white/30 bg-[#121216] p-3.5 space-y-2.5"
-              >
-                <input
-                  type="text"
-                  required
-                  value={editBoardName}
-                  onChange={(e) => setEditBoardName(e.target.value)}
-                  className="w-full rounded-lg border border-white/20 bg-white/[0.07] px-2.5 py-1.5 text-xs text-white focus:outline-none"
-                />
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  {BOARD_COLOR_PALETTE.map((c) => (
-                    <button
-                      key={c.hex}
-                      type="button"
-                      onClick={() => setEditBoardColor(c.hex)}
-                      className={`h-4 w-4 rounded-full ${
-                        editBoardColor === c.hex
-                          ? 'ring-2 ring-white ring-offset-1 ring-offset-[#121216]'
-                          : 'opacity-70'
-                      }`}
-                      style={{ backgroundColor: c.hex }}
-                    />
-                  ))}
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="submit"
-                    className="rounded-full bg-white text-[#0A0A0C] px-3 py-1 text-[11px] font-semibold"
-                  >
-                    Save
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setEditingBoardId(null)}
-                    className="rounded-full border border-white/15 px-2.5 py-1 text-[11px] text-zinc-400"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </form>
+      <LayoutGroup id="kanso-boards">
+        <div
+          onDragOver={(e) => handleContainerDragOver(e, 'board', null)}
+          onDrop={(e) => handleProjectedDrop(e, 'board', null)}
+          className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-8"
+        >
+          {displayBoards.map((board) => {
+            const boardIds = displayBoards.map((b) => b.id);
+            const isSelected = activeBoard?.id === board.id;
+            const isEditing = editingBoardId === board.id;
+            const isDraggingBoard =
+              dragItem?.kind === 'board' && dragItem.id === board.id;
+            const totalTasks = board.projects.reduce(
+              (sum, p) => sum + p.tasks.length,
+              0
             );
-          }
 
-          return (
-            <div
-              key={board.id}
-              onClick={() => setSelectedBoardId(board.id)}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  setSelectedBoardId(board.id);
-                }
-              }}
-              style={{
-                borderColor: isSelected ? `${board.color}75` : `${board.color}35`,
-              }}
-              className={`group relative cursor-pointer rounded-2xl border p-4 transition-all ${
-                isSelected
-                  ? 'bg-[#14141A] shadow-[0_12px_36px_rgba(0,0,0,0.55)]'
-                  : 'bg-[#121216]/85 hover:!border-white/30 hover:bg-[#14141A]'
-              }`}
-            >
-              {/* Top color bar */}
-              <div
-                className="h-1 w-10 rounded-full mb-3 transition-all group-hover:w-14"
-                style={{ backgroundColor: board.color }}
-              />
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <h2 className="text-sm font-semibold text-white truncate">
-                    {board.name}
-                  </h2>
-                  <p className="text-[11px] font-mono text-zinc-500 mt-0.5">
-                    {board.projects.length}{' '}
-                    {board.projects.length === 1 ? 'project' : 'projects'} ·{' '}
-                    {totalTasks} {totalTasks === 1 ? 'task' : 'tasks'}
-                  </p>
-                </div>
-              </div>
+            if (isEditing) {
+              return (
+                <motion.form
+                  key={board.id}
+                  layout="position"
+                  transition={REORDER_SPRING}
+                  onSubmit={(e) => handleSaveBoardEdit(e, board.id)}
+                  className="rounded-2xl border border-white/30 bg-[#121216] p-3.5 space-y-2.5"
+                >
+                  <input
+                    type="text"
+                    required
+                    value={editBoardName}
+                    onChange={(e) => setEditBoardName(e.target.value)}
+                    className="w-full rounded-lg border border-white/20 bg-white/[0.07] px-2.5 py-1.5 text-xs text-white focus:outline-none"
+                  />
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {BOARD_COLOR_PALETTE.map((c) => (
+                      <button
+                        key={c.hex}
+                        type="button"
+                        onClick={() => setEditBoardColor(c.hex)}
+                        className={`h-4 w-4 rounded-full ${
+                          editBoardColor === c.hex
+                            ? 'ring-2 ring-white ring-offset-1 ring-offset-[#121216]'
+                            : 'opacity-70'
+                        }`}
+                        style={{ backgroundColor: c.hex }}
+                      />
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="submit"
+                      className="rounded-full bg-white text-[#0A0A0C] px-3 py-1 text-[11px] font-semibold"
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditingBoardId(null)}
+                      className="rounded-full border border-white/15 px-2.5 py-1 text-[11px] text-zinc-400"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </motion.form>
+              );
+            }
 
-              {/* Edit / Delete Board actions on hover */}
-              <div
-                className="mt-3 flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
-                onClick={(e) => e.stopPropagation()}
+            return (
+              <motion.div
+                key={board.id}
+                layout="position"
+                transition={REORDER_SPRING}
               >
-                <button
-                  type="button"
-                  onClick={() => {
-                    setEditingBoardId(board.id);
-                    setEditBoardName(board.name);
-                    setEditBoardColor(board.color);
+                <div
+                  draggable={!busy && displayBoards.length > 1}
+                  onDragStart={(e) =>
+                    startDrag(
+                      e,
+                      { kind: 'board', id: board.id, parentId: null },
+                      boardIds
+                    )
+                  }
+                  onDragEnd={endDrag}
+                  onDragOver={(e) =>
+                    handleProjectedDragOver(e, 'board', board.id, null, 'x')
+                  }
+                  onDrop={(e) => handleProjectedDrop(e, 'board', null)}
+                  onClick={() => setSelectedBoardId(board.id)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      setSelectedBoardId(board.id);
+                    }
                   }}
-                  title="Edit board name or color"
-                  className="rounded-lg p-1 text-zinc-400 hover:bg-white/10 hover:text-white transition"
+                  style={
+                    isDraggingBoard
+                      ? undefined
+                      : {
+                          borderColor: isSelected
+                            ? `${board.color}75`
+                            : `${board.color}35`,
+                        }
+                  }
+                  className={`group relative h-full cursor-pointer rounded-2xl border p-4 transition-colors ${
+                    isDraggingBoard
+                      ? 'border-dashed !border-sky-400/75 !bg-sky-500/[0.08] ring-1 ring-sky-400/35 shadow-[0_0_24px_rgba(56,189,248,0.16)]'
+                      : isSelected
+                        ? 'bg-[#14141A] shadow-[0_12px_36px_rgba(0,0,0,0.55)]'
+                        : 'bg-[#121216]/85 hover:!border-white/30 hover:bg-[#14141A]'
+                  }`}
                 >
-                  <Palette className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleDeleteBoard(board.id)}
-                  title="Delete board"
-                  className="rounded-lg p-1 text-zinc-400 hover:bg-rose-500/20 hover:text-rose-300 transition"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-          );
-        })}
+                  <div
+                    className={
+                      isDraggingBoard
+                        ? 'opacity-50 transition-opacity'
+                        : 'transition-opacity'
+                    }
+                  >
+                    {/* Top color bar & drag handle */}
+                    <div className="flex items-center justify-between gap-2 mb-3">
+                      <div
+                        className="h-1 w-10 rounded-full transition-all group-hover:w-14"
+                        style={{ backgroundColor: board.color }}
+                      />
+                      {displayBoards.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={(e) => e.stopPropagation()}
+                          onKeyDown={(e) =>
+                            handleHandleKeyDown(
+                              e,
+                              'board',
+                              board.id,
+                              null,
+                              boardIds,
+                              'x'
+                            )
+                          }
+                          title="Drag to reorder board (or press ← / →)"
+                          aria-label={`Reorder board ${board.name}`}
+                          className="rounded-md p-0.5 text-zinc-500 hover:bg-white/10 hover:text-zinc-200 cursor-grab active:cursor-grabbing opacity-60 group-hover:opacity-100 transition"
+                        >
+                          <GripVertical className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <h2 className="text-sm font-semibold text-white truncate">
+                          {board.name}
+                        </h2>
+                        <p className="text-[11px] font-mono text-zinc-500 mt-0.5">
+                          {board.projects.length}{' '}
+                          {board.projects.length === 1 ? 'project' : 'projects'}{' '}
+                          · {totalTasks} {totalTasks === 1 ? 'task' : 'tasks'}
+                        </p>
+                      </div>
+                    </div>
 
-        {boards.length === 0 && (
-          <div className="col-span-full rounded-2xl border border-dashed border-white/15 bg-white/[0.02] p-8 text-center text-sm text-zinc-400">
-            Click <strong className="text-white">New Board</strong> above to
-            create your first Task Board (up to 5).
-          </div>
-        )}
-      </div>
+                    {/* Edit / Delete Board actions on hover */}
+                    <div
+                      className="mt-3 flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingBoardId(board.id);
+                          setEditBoardName(board.name);
+                          setEditBoardColor(board.color);
+                        }}
+                        title="Edit board name or color"
+                        className="rounded-lg p-1 text-zinc-400 hover:bg-white/10 hover:text-white transition"
+                      >
+                        <Palette className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteBoard(board.id)}
+                        title="Delete board"
+                        className="rounded-lg p-1 text-zinc-400 hover:bg-rose-500/20 hover:text-rose-300 transition"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            );
+          })}
+
+          {displayBoards.length === 0 && (
+            <div className="col-span-full rounded-2xl border border-dashed border-white/15 bg-white/[0.02] p-8 text-center text-sm text-zinc-400">
+              Click <strong className="text-white">New Board</strong> above to
+              create your first Task Board (up to 5).
+            </div>
+          )}
+        </div>
+      </LayoutGroup>
 
       {/* Selected Board Workspace: Projects -> Tasks -> Subtasks */}
       {activeBoard && (
@@ -622,446 +1142,722 @@ export function TaskManagementView({
               </button>
             </div>
           ) : (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-              {activeBoard.projects.map((project) => (
-                <div
-                  key={project.id}
-                  style={{ borderColor: `${activeBoard.color}28` }}
-                  className="rounded-2xl border bg-[#0B0B0F] p-5 flex flex-col justify-between"
-                >
-                  <div>
-                    {/* Project Header */}
-                    <div className="flex items-start justify-between gap-3 mb-4">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span
-                            className="h-2.5 w-2.5 rounded-full"
-                            style={{
-                              backgroundColor: activeBoard.color,
-                              boxShadow: `0 0 6px ${activeBoard.color}60`,
-                            }}
-                          />
-                          <h3 className="text-base font-bold text-white">
-                            {project.name}
-                          </h3>
-                        </div>
-                        {project.description && (
-                          <p className="text-xs text-zinc-500 mt-1">
-                            {project.description}
-                          </p>
-                        )}
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteProject(project.id)}
-                        title="Delete Project"
-                        className="rounded-lg p-1.5 text-zinc-600 hover:bg-rose-500/15 hover:text-rose-300 transition"
+            <LayoutGroup id={`kanso-projects-${activeBoard.id}`}>
+              <div
+                onDragOver={(e) =>
+                  handleContainerDragOver(e, 'project', activeBoard.id)
+                }
+                onDrop={(e) =>
+                  handleProjectedDrop(e, 'project', activeBoard.id)
+                }
+                className="grid grid-cols-1 lg:grid-cols-2 gap-5"
+              >
+                {activeBoard.projects.map((project) => {
+                  const projectIds = activeBoard.projects.map((p) => p.id);
+                  const projectAxis: 'x' | 'y' =
+                    typeof window !== 'undefined' && window.innerWidth < 1024
+                      ? 'y'
+                      : 'x';
+                  const isDraggingProject =
+                    dragItem?.kind === 'project' && dragItem.id === project.id;
+                  const taskIds = project.tasks.map((t) => t.id);
+
+                  return (
+                    <motion.div
+                      key={project.id}
+                      layout="position"
+                      transition={REORDER_SPRING}
+                      className="flex flex-col"
+                    >
+                      <div
+                        data-reorder-project={project.id}
+                        onDragOver={(e) =>
+                          handleProjectedDragOver(
+                            e,
+                            'project',
+                            project.id,
+                            activeBoard.id,
+                            projectAxis
+                          )
+                        }
+                        onDrop={(e) =>
+                          handleProjectedDrop(e, 'project', activeBoard.id)
+                        }
+                        style={
+                          isDraggingProject
+                            ? undefined
+                            : { borderColor: `${activeBoard.color}28` }
+                        }
+                        className={`relative flex-1 rounded-2xl border p-5 flex flex-col justify-between transition-colors ${
+                          isDraggingProject
+                            ? 'border-dashed !border-sky-400/75 !bg-sky-500/[0.06] ring-1 ring-sky-400/30 shadow-[0_0_28px_rgba(56,189,248,0.14)]'
+                            : 'bg-[#0B0B0F]'
+                        }`}
                       >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-
-                    {/* Tasks List */}
-                    <div className="space-y-2.5">
-                      {project.tasks.map((task) => {
-                        const isExpanded =
-                          expandedTasks[task.id] ?? task.subtasks.length > 0;
-                        const completedSubs = task.subtasks.filter(
-                          (s) => s.completed
-                        ).length;
-
-                        return (
+                        <div
+                          className={
+                            isDraggingProject
+                              ? 'opacity-55 transition-opacity'
+                              : 'transition-opacity'
+                          }
+                        >
+                          {/* Project Header */}
                           <div
-                            key={task.id}
-                            className="rounded-xl border border-white/10 bg-[#121216] p-3.5"
+                            draggable={!busy && activeBoard.projects.length > 1}
+                            onDragStart={(e) =>
+                              startDrag(
+                                e,
+                                {
+                                  kind: 'project',
+                                  id: project.id,
+                                  parentId: activeBoard.id,
+                                },
+                                projectIds,
+                                '[data-reorder-project]'
+                              )
+                            }
+                            onDragEnd={endDrag}
+                            className="flex items-start justify-between gap-3 mb-4"
                           >
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="flex items-center gap-2.5 min-w-0">
-                                <button
-                                  type="button"
-                                  onClick={() => handleToggleTask(task)}
-                                  title={
-                                    task.completed
-                                      ? 'Unmark task as done'
-                                      : 'Mark task as done'
-                                  }
-                                  aria-label={
-                                    task.completed
-                                      ? `Unmark ${task.title} as done`
-                                      : `Mark ${task.title} as done`
-                                  }
-                                  className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition ${
-                                    task.completed
-                                      ? 'border-emerald-400 bg-emerald-400 text-[#0A0A0C]'
-                                      : 'border-white/30 hover:border-white'
-                                  }`}
-                                >
-                                  {task.completed && (
-                                    <Check className="w-3 h-3 stroke-[3]" />
-                                  )}
-                                </button>
-
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setExpandedTasks((prev) => ({
-                                      ...prev,
-                                      [task.id]: !isExpanded,
-                                    }))
-                                  }
-                                  className="flex items-center gap-1.5 text-left min-w-0"
-                                >
-                                  {isExpanded ? (
-                                    <ChevronDown className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-                                  ) : (
-                                    <ChevronRight className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-                                  )}
-                                  <span
-                                    className={`text-sm font-semibold truncate ${
-                                      task.completed
-                                        ? 'line-through text-zinc-500'
-                                        : 'text-zinc-100'
-                                    }`}
-                                  >
-                                    {task.title}
-                                  </span>
-                                </button>
-
-                                {task.subtasks.length > 0 && (
-                                  <span className="text-[11px] font-mono text-zinc-500 shrink-0">
-                                    {completedSubs}/{task.subtasks.length}
-                                  </span>
-                                )}
-
-                                {task.scheduled_date && (
+                            <div>
+                              <div className="flex items-center gap-2">
+                                {activeBoard.projects.length > 1 && (
                                   <button
                                     type="button"
-                                    onClick={() => openScheduleEditor(task)}
-                                    title="Edit task schedule"
-                                    className="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/[0.05] hover:border-white/35 px-2.5 py-0.5 text-[10px] font-mono text-zinc-300 shrink-0 transition"
-                                  >
-                                    <Calendar className="w-2.5 h-2.5 text-zinc-400" />
-                                    <span>
-                                      {formatShortDateLabel(
-                                        task.scheduled_date
-                                      )}
-                                      {task.scheduled_time
-                                        ? ` · ${task.scheduled_time}`
-                                        : ''}
-                                    </span>
-                                  </button>
-                                )}
-                              </div>
-
-                              <div className="flex items-center gap-1.5 shrink-0">
-                                {task.time_spent_seconds > 0 && (
-                                  <span className="text-[11px] font-mono text-zinc-500 mr-1">
-                                    {formatLoggedDuration(
-                                      task.time_spent_seconds
-                                    )}
-                                  </span>
-                                )}
-                                <button
-                                  type="button"
-                                  onClick={() => openScheduleEditor(task)}
-                                  title={
-                                    task.scheduled_date
-                                      ? 'Edit task schedule'
-                                      : 'Schedule task'
-                                  }
-                                  aria-label={`Schedule ${task.title}`}
-                                  className={`rounded-lg p-1.5 transition ${
-                                    schedulingTaskId === task.id ||
-                                    task.scheduled_date
-                                      ? 'bg-white/15 text-white hover:bg-white/25'
-                                      : 'text-zinc-500 hover:bg-white/10 hover:text-white'
-                                  }`}
-                                >
-                                  <Calendar className="w-3.5 h-3.5" />
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    onStartWork({
-                                      boardId: activeBoard.id,
-                                      projectId: project.id,
-                                      taskId: task.id,
-                                      subtaskId: null,
-                                    })
-                                  }
-                                  title="Work on this task"
-                                  className="inline-flex items-center gap-1 rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 px-3 py-1 text-xs font-semibold transition"
-                                >
-                                  <Play className="w-2.5 h-2.5 fill-[#0A0A0C]" />
-                                  <span>Work</span>
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => handleDeleteTask(task.id)}
-                                  title="Delete task"
-                                  className="rounded-lg p-1 text-zinc-500 hover:bg-rose-500/15 hover:text-rose-300 transition"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            </div>
-
-                            {/* Inline Task Schedule Editor */}
-                            {schedulingTaskId === task.id && (
-                              <form
-                                onSubmit={(e) => handleSaveSchedule(e, task.id)}
-                                className="mt-3 rounded-xl border border-white/15 bg-[#0A0A0C] p-3 flex flex-wrap items-end gap-2.5"
-                              >
-                                <div className="flex-1 min-w-[130px]">
-                                  <label className="block text-[11px] font-medium text-zinc-400 mb-1">
-                                    Date
-                                  </label>
-                                  <input
-                                    type="date"
-                                    required
-                                    value={scheduleDateDraft}
-                                    onChange={(e) =>
-                                      setScheduleDateDraft(e.target.value)
-                                    }
-                                    className="w-full rounded-lg border border-white/15 bg-white/[0.07] px-2.5 py-1.5 text-xs text-white focus:border-white/35 focus:outline-none [color-scheme:dark]"
-                                  />
-                                </div>
-
-                                <div className="w-28">
-                                  <label className="block text-[11px] font-medium text-zinc-400 mb-1">
-                                    Time (opt)
-                                  </label>
-                                  <input
-                                    type="time"
-                                    value={scheduleTimeDraft}
-                                    onChange={(e) =>
-                                      setScheduleTimeDraft(e.target.value)
-                                    }
-                                    className="w-full rounded-lg border border-white/15 bg-white/[0.07] px-2.5 py-1.5 text-xs text-white focus:border-white/35 focus:outline-none [color-scheme:dark]"
-                                  />
-                                </div>
-
-                                <div className="w-24">
-                                  <label className="block text-[11px] font-medium text-zinc-400 mb-1">
-                                    Duration (opt)
-                                  </label>
-                                  <select
-                                    value={scheduleDurationDraft ?? ''}
-                                    onChange={(e) =>
-                                      setScheduleDurationDraft(
-                                        e.target.value
-                                          ? Number(e.target.value)
-                                          : null
+                                    onKeyDown={(e) =>
+                                      handleHandleKeyDown(
+                                        e,
+                                        'project',
+                                        project.id,
+                                        activeBoard.id,
+                                        projectIds,
+                                        projectAxis
                                       )
                                     }
-                                    className="w-full rounded-lg border border-white/15 bg-[#121318] px-2 py-1.5 text-xs text-white focus:border-white/35 focus:outline-none"
+                                    title="Drag to reorder project (or press arrow keys)"
+                                    aria-label={`Reorder project ${project.name}`}
+                                    className="rounded-md p-0.5 text-zinc-500 hover:bg-white/10 hover:text-zinc-200 cursor-grab active:cursor-grabbing transition shrink-0"
                                   >
-                                    <option value="">-</option>
-                                    {scheduleDurationDraft !== null &&
-                                      ![
-                                        15, 25, 30, 45, 50, 60, 90, 120, 180,
-                                        240,
-                                      ].includes(scheduleDurationDraft) && (
-                                        <option value={scheduleDurationDraft}>
-                                          {scheduleDurationDraft}m
-                                        </option>
-                                      )}
-                                    <option value={15}>15m</option>
-                                    <option value={25}>25m</option>
-                                    <option value={30}>30m</option>
-                                    <option value={45}>45m</option>
-                                    <option value={50}>50m</option>
-                                    <option value={60}>1h</option>
-                                    <option value={90}>1h 30m</option>
-                                    <option value={120}>2h</option>
-                                    <option value={180}>3h</option>
-                                    <option value={240}>4h</option>
-                                  </select>
-                                </div>
-
-                                <div className="flex items-center gap-1.5 ml-auto">
-                                  {task.scheduled_date && (
-                                    <button
-                                      type="button"
-                                      disabled={busy}
-                                      onClick={() =>
-                                        handleClearSchedule(task.id)
-                                      }
-                                      className="rounded-lg border border-rose-500/35 bg-rose-500/10 hover:bg-rose-500/20 px-2.5 py-1.5 text-[11px] font-medium text-rose-300 transition"
-                                    >
-                                      Clear
-                                    </button>
-                                  )}
-                                  <button
-                                    type="button"
-                                    onClick={() => setSchedulingTaskId(null)}
-                                    className="rounded-lg border border-white/15 px-2.5 py-1.5 text-[11px] text-zinc-400 hover:text-white transition"
-                                  >
-                                    Cancel
+                                    <GripVertical className="w-3.5 h-3.5" />
                                   </button>
-                                  <button
-                                    type="submit"
-                                    disabled={busy}
-                                    className="rounded-lg bg-white text-[#0A0A0C] hover:bg-zinc-200 px-3 py-1.5 text-[11px] font-semibold transition"
-                                  >
-                                    Save
-                                  </button>
-                                </div>
-                              </form>
-                            )}
-
-                            {/* Optional Subtasks Section */}
-                            {isExpanded && (
-                              <div className="mt-3 pl-6 space-y-1.5 border-l border-white/10 ml-2">
-                                {task.subtasks.map((sub) => (
-                                  <div
-                                    key={sub.id}
-                                    className="group/sub flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 hover:bg-white/[0.04] transition"
-                                  >
-                                    <div className="flex items-center gap-2 min-w-0">
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          handleToggleSubtask(
-                                            sub.id,
-                                            sub.completed
-                                          )
-                                        }
-                                        title={
-                                          sub.completed
-                                            ? 'Unmark subtask as done'
-                                            : 'Mark subtask as done'
-                                        }
-                                        aria-label={
-                                          sub.completed
-                                            ? `Unmark ${sub.title} as done`
-                                            : `Mark ${sub.title} as done`
-                                        }
-                                        className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border transition ${
-                                          sub.completed
-                                            ? 'border-emerald-400 bg-emerald-400 text-[#0A0A0C]'
-                                            : 'border-white/25 hover:border-white'
-                                        }`}
-                                      >
-                                        {sub.completed && (
-                                          <Check className="w-2.5 h-2.5 stroke-[3]" />
-                                        )}
-                                      </button>
-                                      <span
-                                        className={`text-xs truncate ${
-                                          sub.completed
-                                            ? 'line-through text-zinc-500'
-                                            : 'text-zinc-300'
-                                        }`}
-                                      >
-                                        {sub.title}
-                                      </span>
-                                    </div>
-
-                                    <div className="flex items-center gap-1.5 shrink-0">
-                                      {sub.time_spent_seconds > 0 && (
-                                        <span className="text-[10px] font-mono text-zinc-500">
-                                          {formatLoggedDuration(
-                                            sub.time_spent_seconds
-                                          )}
-                                        </span>
-                                      )}
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          onStartWork({
-                                            boardId: activeBoard.id,
-                                            projectId: project.id,
-                                            taskId: task.id,
-                                            subtaskId: sub.id,
-                                          })
-                                        }
-                                        title="Work on this subtask"
-                                        aria-label={`Work on ${sub.title}`}
-                                        className="opacity-70 group-hover/sub:opacity-100 inline-flex h-6 w-6 items-center justify-center rounded-full border border-white/15 bg-white/[0.06] hover:bg-white hover:text-[#0A0A0C] text-zinc-200 transition"
-                                      >
-                                        <Play className="w-2.5 h-2.5 fill-current" />
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          handleDeleteSubtask(sub.id)
-                                        }
-                                        title="Delete subtask"
-                                        className="opacity-0 group-hover/sub:opacity-100 rounded-lg p-0.5 text-zinc-500 hover:text-rose-300 transition"
-                                      >
-                                        <X className="w-3 h-3" />
-                                      </button>
-                                    </div>
-                                  </div>
-                                ))}
-
-                                {/* Add Subtask Input */}
-                                <form
-                                  onSubmit={(e) =>
-                                    handleCreateSubtask(e, task.id)
-                                  }
-                                  className="flex items-center gap-1.5 pt-1"
-                                >
-                                  <input
-                                    type="text"
-                                    value={subtaskDrafts[task.id] || ''}
-                                    onChange={(e) =>
-                                      setSubtaskDrafts((prev) => ({
-                                        ...prev,
-                                        [task.id]: e.target.value,
-                                      }))
-                                    }
-                                    placeholder="+ Add optional subtask..."
-                                    className="flex-1 rounded-lg border border-white/10 bg-white/[0.06] px-2.5 py-1.5 text-xs text-white placeholder:text-zinc-600 focus:border-white/30 focus:outline-none"
-                                  />
-                                  <button
-                                    type="submit"
-                                    disabled={
-                                      busy ||
-                                      !(subtaskDrafts[task.id] || '').trim()
-                                    }
-                                    className="rounded-lg border border-white/15 bg-white/[0.06] hover:bg-white hover:text-[#0A0A0C] disabled:opacity-30 px-2.5 py-1.5 text-[11px] font-medium text-zinc-200 transition"
-                                  >
-                                    Add
-                                  </button>
-                                </form>
+                                )}
+                                <span
+                                  className="h-2.5 w-2.5 rounded-full shrink-0"
+                                  style={{
+                                    backgroundColor: activeBoard.color,
+                                    boxShadow: `0 0 6px ${activeBoard.color}60`,
+                                  }}
+                                />
+                                <h3 className="text-base font-bold text-white">
+                                  {project.name}
+                                </h3>
                               </div>
-                            )}
+                              {project.description && (
+                                <p className="text-xs text-zinc-500 mt-1">
+                                  {project.description}
+                                </p>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteProject(project.id)}
+                              title="Delete Project"
+                              className="rounded-lg p-1.5 text-zinc-600 hover:bg-rose-500/15 hover:text-rose-300 transition"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
                           </div>
-                        );
-                      })}
-                    </div>
-                  </div>
 
-                  {/* Add Task to Project */}
-                  <form
-                    onSubmit={(e) => handleCreateTask(e, project.id)}
-                    className="mt-4 pt-3 border-t border-white/[0.08] flex items-center gap-2"
-                  >
-                    <input
-                      type="text"
-                      value={taskDrafts[project.id] || ''}
-                      onChange={(e) =>
-                        setTaskDrafts((prev) => ({
-                          ...prev,
-                          [project.id]: e.target.value,
-                        }))
-                      }
-                      placeholder="+ New task in this project..."
-                      className="flex-1 rounded-xl border border-white/15 bg-white/[0.07] px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-white/35 focus:outline-none"
-                    />
-                    <button
-                      type="submit"
-                      disabled={busy || !(taskDrafts[project.id] || '').trim()}
-                      className="rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 disabled:opacity-30 px-4 py-2 text-xs font-semibold transition"
-                    >
-                      Add Task
-                    </button>
-                  </form>
-                </div>
-              ))}
-            </div>
+                          {/* Tasks List */}
+                          <LayoutGroup id={`kanso-tasks-${project.id}`}>
+                            <div
+                              onDragOver={(e) =>
+                                handleContainerDragOver(e, 'task', project.id)
+                              }
+                              onDrop={(e) =>
+                                handleProjectedDrop(e, 'task', project.id)
+                              }
+                              className="space-y-2.5"
+                            >
+                              {project.tasks.map((task) => {
+                                const isExpanded =
+                                  expandedTasks[task.id] ??
+                                  task.subtasks.length > 0;
+                                const completedSubs = task.subtasks.filter(
+                                  (s) => s.completed
+                                ).length;
+                                const isDraggingTask =
+                                  dragItem?.kind === 'task' &&
+                                  dragItem.id === task.id;
+                                const subtaskIds = task.subtasks.map(
+                                  (s) => s.id
+                                );
+
+                                return (
+                                  <motion.div
+                                    key={task.id}
+                                    layout="position"
+                                    transition={REORDER_SPRING}
+                                  >
+                                    <div
+                                      data-reorder-task={task.id}
+                                      onDragOver={(e) =>
+                                        handleProjectedDragOver(
+                                          e,
+                                          'task',
+                                          task.id,
+                                          project.id,
+                                          'y'
+                                        )
+                                      }
+                                      onDrop={(e) =>
+                                        handleProjectedDrop(
+                                          e,
+                                          'task',
+                                          project.id
+                                        )
+                                      }
+                                      className={`relative rounded-xl border p-3.5 transition-colors ${
+                                        isDraggingTask
+                                          ? 'border-dashed !border-sky-400/75 !bg-sky-500/[0.08] ring-1 ring-sky-400/35 shadow-[0_0_20px_rgba(56,189,248,0.14)]'
+                                          : 'border-white/10 bg-[#121216]'
+                                      }`}
+                                    >
+                                      <div
+                                        className={
+                                          isDraggingTask
+                                            ? 'opacity-55 transition-opacity'
+                                            : 'transition-opacity'
+                                        }
+                                      >
+                                        <div
+                                          draggable={
+                                            !busy && project.tasks.length > 1
+                                          }
+                                          onDragStart={(e) =>
+                                            startDrag(
+                                              e,
+                                              {
+                                                kind: 'task',
+                                                id: task.id,
+                                                parentId: project.id,
+                                              },
+                                              taskIds,
+                                              '[data-reorder-task]'
+                                            )
+                                          }
+                                          onDragEnd={endDrag}
+                                          className="flex items-center justify-between gap-2"
+                                        >
+                                          <div className="flex items-center gap-2.5 min-w-0">
+                                            {project.tasks.length > 1 && (
+                                              <button
+                                                type="button"
+                                                onKeyDown={(e) =>
+                                                  handleHandleKeyDown(
+                                                    e,
+                                                    'task',
+                                                    task.id,
+                                                    project.id,
+                                                    taskIds,
+                                                    'y'
+                                                  )
+                                                }
+                                                title="Drag to reorder task (or press ↑ / ↓)"
+                                                aria-label={`Reorder task ${task.title}`}
+                                                className="rounded-md p-0.5 text-zinc-500 hover:bg-white/10 hover:text-zinc-200 cursor-grab active:cursor-grabbing transition shrink-0"
+                                              >
+                                                <GripVertical className="w-3.5 h-3.5" />
+                                              </button>
+                                            )}
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                handleToggleTask(task)
+                                              }
+                                              title={
+                                                task.completed
+                                                  ? 'Unmark task as done'
+                                                  : 'Mark task as done'
+                                              }
+                                              aria-label={
+                                                task.completed
+                                                  ? `Unmark ${task.title} as done`
+                                                  : `Mark ${task.title} as done`
+                                              }
+                                              className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition ${
+                                                task.completed
+                                                  ? 'border-emerald-400 bg-emerald-400 text-[#0A0A0C]'
+                                                  : 'border-white/30 hover:border-white'
+                                              }`}
+                                            >
+                                              {task.completed && (
+                                                <Check className="w-3 h-3 stroke-[3]" />
+                                              )}
+                                            </button>
+
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                setExpandedTasks((prev) => ({
+                                                  ...prev,
+                                                  [task.id]: !isExpanded,
+                                                }))
+                                              }
+                                              className="flex items-center gap-1.5 text-left min-w-0"
+                                            >
+                                              {isExpanded ? (
+                                                <ChevronDown className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                                              ) : (
+                                                <ChevronRight className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                                              )}
+                                              <span
+                                                className={`text-sm font-semibold truncate ${
+                                                  task.completed
+                                                    ? 'line-through text-zinc-500'
+                                                    : 'text-zinc-100'
+                                                }`}
+                                              >
+                                                {task.title}
+                                              </span>
+                                            </button>
+
+                                            {task.subtasks.length > 0 && (
+                                              <span className="text-[11px] font-mono text-zinc-500 shrink-0">
+                                                {completedSubs}/
+                                                {task.subtasks.length}
+                                              </span>
+                                            )}
+
+                                            {task.scheduled_date && (
+                                              <button
+                                                type="button"
+                                                onClick={() =>
+                                                  openScheduleEditor(
+                                                    'task',
+                                                    task
+                                                  )
+                                                }
+                                                title="Edit task schedule"
+                                                className="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/[0.05] hover:border-white/35 px-2.5 py-0.5 text-[10px] font-mono text-zinc-300 shrink-0 transition"
+                                              >
+                                                <Calendar className="w-2.5 h-2.5 text-zinc-400" />
+                                                <span>
+                                                  {formatShortDateLabel(
+                                                    task.scheduled_date
+                                                  )}
+                                                  {task.scheduled_time
+                                                    ? ` · ${task.scheduled_time}`
+                                                    : ''}
+                                                </span>
+                                              </button>
+                                            )}
+                                          </div>
+
+                                          <div className="flex items-center gap-1.5 shrink-0">
+                                            {task.time_spent_seconds > 0 && (
+                                              <span className="text-[11px] font-mono text-zinc-500 mr-1">
+                                                {formatLoggedDuration(
+                                                  task.time_spent_seconds
+                                                )}
+                                              </span>
+                                            )}
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                openScheduleEditor('task', task)
+                                              }
+                                              title={
+                                                task.scheduled_date
+                                                  ? 'Edit task schedule'
+                                                  : 'Schedule task'
+                                              }
+                                              aria-label={`Schedule ${task.title}`}
+                                              className={`rounded-lg p-1.5 transition ${
+                                                (schedulingTarget?.kind ===
+                                                  'task' &&
+                                                  schedulingTarget.id ===
+                                                    task.id) ||
+                                                task.scheduled_date
+                                                  ? 'bg-white/15 text-white hover:bg-white/25'
+                                                  : 'text-zinc-500 hover:bg-white/10 hover:text-white'
+                                              }`}
+                                            >
+                                              <Calendar className="w-3.5 h-3.5" />
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                onStartWork({
+                                                  boardId: activeBoard.id,
+                                                  projectId: project.id,
+                                                  taskId: task.id,
+                                                  subtaskId: null,
+                                                })
+                                              }
+                                              title="Work on this task"
+                                              className="inline-flex items-center gap-1 rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 px-3 py-1 text-xs font-semibold transition"
+                                            >
+                                              <Play className="w-2.5 h-2.5 fill-[#0A0A0C]" />
+                                              <span>Work</span>
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                handleDeleteTask(task.id)
+                                              }
+                                              title="Delete task"
+                                              className="rounded-lg p-1 text-zinc-500 hover:bg-rose-500/15 hover:text-rose-300 transition"
+                                            >
+                                              <Trash2 className="w-3.5 h-3.5" />
+                                            </button>
+                                          </div>
+                                        </div>
+
+                                        {/* Inline Task Schedule Editor */}
+                                        {schedulingTarget?.kind === 'task' &&
+                                          schedulingTarget.id === task.id &&
+                                          renderInlineScheduleForm(
+                                            { kind: 'task', id: task.id },
+                                            Boolean(task.scheduled_date)
+                                          )}
+
+                                        {/* Optional Subtasks Section */}
+                                        {isExpanded && (
+                                          <LayoutGroup
+                                            id={`kanso-subtasks-${task.id}`}
+                                          >
+                                            <div
+                                              onDragOver={(e) =>
+                                                handleContainerDragOver(
+                                                  e,
+                                                  'subtask',
+                                                  task.id
+                                                )
+                                              }
+                                              onDrop={(e) =>
+                                                handleProjectedDrop(
+                                                  e,
+                                                  'subtask',
+                                                  task.id
+                                                )
+                                              }
+                                              className="mt-3 pl-6 space-y-1.5 border-l border-white/10 ml-2"
+                                            >
+                                              {task.subtasks.map((sub) => {
+                                                const isDraggingSubtask =
+                                                  dragItem?.kind ===
+                                                    'subtask' &&
+                                                  dragItem.id === sub.id;
+
+                                                return (
+                                                  <motion.div
+                                                    key={sub.id}
+                                                    layout="position"
+                                                    transition={REORDER_SPRING}
+                                                  >
+                                                    <div
+                                                      onDragOver={(e) =>
+                                                        handleProjectedDragOver(
+                                                          e,
+                                                          'subtask',
+                                                          sub.id,
+                                                          task.id,
+                                                          'y'
+                                                        )
+                                                      }
+                                                      onDrop={(e) =>
+                                                        handleProjectedDrop(
+                                                          e,
+                                                          'subtask',
+                                                          task.id
+                                                        )
+                                                      }
+                                                      className="relative"
+                                                    >
+                                                      <div
+                                                        draggable={
+                                                          !busy &&
+                                                          task.subtasks.length >
+                                                            1
+                                                        }
+                                                        onDragStart={(e) =>
+                                                          startDrag(
+                                                            e,
+                                                            {
+                                                              kind: 'subtask',
+                                                              id: sub.id,
+                                                              parentId: task.id,
+                                                            },
+                                                            subtaskIds
+                                                          )
+                                                        }
+                                                        onDragEnd={endDrag}
+                                                        className={`group/sub flex items-center justify-between gap-2 rounded-lg border px-2 py-1.5 transition-colors ${
+                                                          isDraggingSubtask
+                                                            ? 'border-dashed border-sky-400/70 bg-sky-500/[0.1] shadow-[0_0_16px_rgba(56,189,248,0.14)] opacity-80'
+                                                            : 'border-transparent hover:bg-white/[0.04]'
+                                                        }`}
+                                                      >
+                                                        <div className="flex items-center gap-2 min-w-0">
+                                                          {task.subtasks
+                                                            .length > 1 && (
+                                                            <button
+                                                              type="button"
+                                                              onKeyDown={(e) =>
+                                                                handleHandleKeyDown(
+                                                                  e,
+                                                                  'subtask',
+                                                                  sub.id,
+                                                                  task.id,
+                                                                  subtaskIds,
+                                                                  'y'
+                                                                )
+                                                              }
+                                                              title="Drag to reorder subtask (or press ↑ / ↓)"
+                                                              aria-label={`Reorder subtask ${sub.title}`}
+                                                              className="rounded p-0.5 text-zinc-600 hover:bg-white/10 hover:text-zinc-200 cursor-grab active:cursor-grabbing opacity-60 group-hover/sub:opacity-100 transition shrink-0"
+                                                            >
+                                                              <GripVertical className="w-3 h-3" />
+                                                            </button>
+                                                          )}
+                                                          <button
+                                                            type="button"
+                                                            onClick={() =>
+                                                              handleToggleSubtask(
+                                                                sub.id,
+                                                                sub.completed
+                                                              )
+                                                            }
+                                                            title={
+                                                              sub.completed
+                                                                ? 'Unmark subtask as done'
+                                                                : 'Mark subtask as done'
+                                                            }
+                                                            aria-label={
+                                                              sub.completed
+                                                                ? `Unmark ${sub.title} as done`
+                                                                : `Mark ${sub.title} as done`
+                                                            }
+                                                            className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border transition ${
+                                                              sub.completed
+                                                                ? 'border-emerald-400 bg-emerald-400 text-[#0A0A0C]'
+                                                                : 'border-white/25 hover:border-white'
+                                                            }`}
+                                                          >
+                                                            {sub.completed && (
+                                                              <Check className="w-2.5 h-2.5 stroke-[3]" />
+                                                            )}
+                                                          </button>
+                                                          <span
+                                                            className={`text-xs truncate ${
+                                                              sub.completed
+                                                                ? 'line-through text-zinc-500'
+                                                                : 'text-zinc-300'
+                                                            }`}
+                                                          >
+                                                            {sub.title}
+                                                          </span>
+                                                          {sub.scheduled_date && (
+                                                            <button
+                                                              type="button"
+                                                              onClick={() =>
+                                                                openScheduleEditor(
+                                                                  'subtask',
+                                                                  sub
+                                                                )
+                                                              }
+                                                              title="Edit subtask schedule"
+                                                              className="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/[0.05] hover:border-white/35 px-2 py-0.5 text-[10px] font-mono text-zinc-300 shrink-0 transition"
+                                                            >
+                                                              <Calendar className="w-2.5 h-2.5 text-zinc-400" />
+                                                              <span>
+                                                                {formatShortDateLabel(
+                                                                  sub.scheduled_date
+                                                                )}
+                                                                {sub.scheduled_time
+                                                                  ? ` · ${sub.scheduled_time}`
+                                                                  : ''}
+                                                              </span>
+                                                            </button>
+                                                          )}
+                                                        </div>
+
+                                                        <div className="flex items-center gap-1.5 shrink-0">
+                                                          {sub.time_spent_seconds >
+                                                            0 && (
+                                                            <span className="text-[10px] font-mono text-zinc-500">
+                                                              {formatLoggedDuration(
+                                                                sub.time_spent_seconds
+                                                              )}
+                                                            </span>
+                                                          )}
+                                                          <button
+                                                            type="button"
+                                                            onClick={() =>
+                                                              openScheduleEditor(
+                                                                'subtask',
+                                                                sub
+                                                              )
+                                                            }
+                                                            title={
+                                                              sub.scheduled_date
+                                                                ? 'Edit subtask schedule'
+                                                                : 'Schedule subtask'
+                                                            }
+                                                            aria-label={`Schedule ${sub.title}`}
+                                                            className={`rounded-lg p-1 transition ${
+                                                              (schedulingTarget?.kind ===
+                                                                'subtask' &&
+                                                                schedulingTarget.id ===
+                                                                  sub.id) ||
+                                                              sub.scheduled_date
+                                                                ? 'bg-white/15 text-white hover:bg-white/25'
+                                                                : 'opacity-70 group-hover/sub:opacity-100 text-zinc-500 hover:bg-white/10 hover:text-white'
+                                                            }`}
+                                                          >
+                                                            <Calendar className="w-3 h-3" />
+                                                          </button>
+                                                          <button
+                                                            type="button"
+                                                            onClick={() =>
+                                                              onStartWork({
+                                                                boardId:
+                                                                  activeBoard.id,
+                                                                projectId:
+                                                                  project.id,
+                                                                taskId: task.id,
+                                                                subtaskId:
+                                                                  sub.id,
+                                                              })
+                                                            }
+                                                            title="Work on this subtask"
+                                                            aria-label={`Work on ${sub.title}`}
+                                                            className="opacity-70 group-hover/sub:opacity-100 inline-flex h-6 w-6 items-center justify-center rounded-full border border-white/15 bg-white/[0.06] hover:bg-white hover:text-[#0A0A0C] text-zinc-200 transition"
+                                                          >
+                                                            <Play className="w-2.5 h-2.5 fill-current" />
+                                                          </button>
+                                                          <button
+                                                            type="button"
+                                                            onClick={() =>
+                                                              handleDeleteSubtask(
+                                                                sub.id
+                                                              )
+                                                            }
+                                                            title="Delete subtask"
+                                                            className="opacity-0 group-hover/sub:opacity-100 rounded-lg p-0.5 text-zinc-500 hover:text-rose-300 transition"
+                                                          >
+                                                            <X className="w-3 h-3" />
+                                                          </button>
+                                                        </div>
+                                                      </div>
+
+                                                      {schedulingTarget?.kind ===
+                                                        'subtask' &&
+                                                        schedulingTarget.id ===
+                                                          sub.id &&
+                                                        renderInlineScheduleForm(
+                                                          {
+                                                            kind: 'subtask',
+                                                            id: sub.id,
+                                                          },
+                                                          Boolean(
+                                                            sub.scheduled_date
+                                                          )
+                                                        )}
+                                                    </div>
+                                                  </motion.div>
+                                                );
+                                              })}
+
+                                              {/* Add Subtask Input */}
+                                              <form
+                                                onSubmit={(e) =>
+                                                  handleCreateSubtask(
+                                                    e,
+                                                    task.id
+                                                  )
+                                                }
+                                                className="flex items-center gap-1.5 pt-1"
+                                              >
+                                                <input
+                                                  type="text"
+                                                  value={
+                                                    subtaskDrafts[task.id] || ''
+                                                  }
+                                                  onChange={(e) =>
+                                                    setSubtaskDrafts(
+                                                      (prev) => ({
+                                                        ...prev,
+                                                        [task.id]:
+                                                          e.target.value,
+                                                      })
+                                                    )
+                                                  }
+                                                  placeholder="+ Add optional subtask..."
+                                                  className="flex-1 rounded-lg border border-white/10 bg-white/[0.06] px-2.5 py-1.5 text-xs text-white placeholder:text-zinc-600 focus:border-white/30 focus:outline-none"
+                                                />
+                                                <button
+                                                  type="submit"
+                                                  disabled={
+                                                    busy ||
+                                                    !(
+                                                      subtaskDrafts[task.id] ||
+                                                      ''
+                                                    ).trim()
+                                                  }
+                                                  className="rounded-lg border border-white/15 bg-white/[0.06] hover:bg-white hover:text-[#0A0A0C] disabled:opacity-30 px-2.5 py-1.5 text-[11px] font-medium text-zinc-200 transition"
+                                                >
+                                                  Add
+                                                </button>
+                                              </form>
+                                            </div>
+                                          </LayoutGroup>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </motion.div>
+                                );
+                              })}
+                            </div>
+                          </LayoutGroup>
+                        </div>
+
+                        {/* Add Task to Project */}
+                        <form
+                          onSubmit={(e) => handleCreateTask(e, project.id)}
+                          className={`mt-4 pt-3 border-t border-white/[0.08] flex items-center gap-2 transition-opacity ${
+                            isDraggingProject ? 'opacity-55' : ''
+                          }`}
+                        >
+                          <input
+                            type="text"
+                            value={taskDrafts[project.id] || ''}
+                            onChange={(e) =>
+                              setTaskDrafts((prev) => ({
+                                ...prev,
+                                [project.id]: e.target.value,
+                              }))
+                            }
+                            placeholder="+ New task in this project..."
+                            className="flex-1 rounded-xl border border-white/15 bg-white/[0.07] px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:border-white/35 focus:outline-none"
+                          />
+                          <button
+                            type="submit"
+                            disabled={
+                              busy || !(taskDrafts[project.id] || '').trim()
+                            }
+                            className="rounded-full bg-white text-[#0A0A0C] hover:bg-zinc-200 disabled:opacity-30 px-4 py-2 text-xs font-semibold transition"
+                          >
+                            Add Task
+                          </button>
+                        </form>
+                      </div>
+                    </motion.div>
+                  );
+                })}
+              </div>
+            </LayoutGroup>
           )}
         </section>
       )}
